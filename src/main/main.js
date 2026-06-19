@@ -29,9 +29,21 @@ function createWindow() {
   win.maximize();
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
-  // Seguridad: bloquear navegacion externa y ventanas emergentes.
-  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  win.webContents.on('will-navigate', (event) => event.preventDefault());
+  // Seguridad: bloquear navegacion interna pero permitir enlaces web en el navegador externo.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http:') || url.startsWith('https:')) {
+      require('electron').shell.openExternal(url);
+    }
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (event, url) => {
+    if (url.startsWith('http:') || url.startsWith('https:')) {
+      event.preventDefault();
+      require('electron').shell.openExternal(url);
+    } else {
+      event.preventDefault();
+    }
+  });
 }
 
 app.whenReady().then(() => {
@@ -63,6 +75,10 @@ function registerIpc() {
     await torManager.startTor((msg) => {
       win.webContents.send('tor:progress', msg);
     });
+    
+    // Configurar el puerto dinámico asignado para el proxy SOCKS
+    const socksPort = torManager.getSocksPort();
+    network.setTorPort(socksPort);
     network.setUseTor(true);
     network.disconnect(); // force reconnect
     return true;

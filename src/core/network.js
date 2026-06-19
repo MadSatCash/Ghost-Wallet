@@ -15,6 +15,8 @@ const SERVERS = [
 
 // Parche mágico para forzar a que WebSockets pase por Tor
 let _useTor = false;
+let _torPort = 9050;
+
 const Module = require('module');
 const originalRequire = Module.prototype.require;
 Module.prototype.require = function(request) {
@@ -27,7 +29,7 @@ Module.prototype.require = function(request) {
         }
         const { SocksProxyAgent } = originalRequire.call(module, 'socks-proxy-agent');
         // socks5h fuerza la resolución de DNS remota (evita DNS leaks)
-        const agent = new SocksProxyAgent('socks5h://127.0.0.1:9050');
+        const agent = new SocksProxyAgent(`socks5h://127.0.0.1:${_torPort}`);
         super(url, protocols, { ...options, agent });
       }
     }
@@ -48,6 +50,10 @@ let _serverName = null;
 
 function setUseTor(enabled) {
   _useTor = enabled;
+}
+
+function setTorPort(port) {
+  _torPort = port;
 }
 
 function isTorEnabled() {
@@ -173,5 +179,6 @@ module.exports = {
   getHistory,
   getTransaction,
   setUseTor,
+  setTorPort,
   isTorEnabled
 };

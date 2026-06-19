@@ -845,6 +845,7 @@ window.api.torStatus().then(async status => {
         await window.api.enableTor();
         setTorConnectedUI();
       } catch (err) {
+        alert('Error al iniciar Tor: ' + err.message);
         console.error(err);
         torCheckbox.checked = false;
         setTorDisconnectedUI();

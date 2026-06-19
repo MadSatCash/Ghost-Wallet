@@ -436,3 +436,25 @@ code {
   border-radius: 12px;
   margin-top: 10px;
 }
+
+/* --- Firma del Autor --- */
+.author-signature {
+  position: fixed;
+  bottom: 12px;
+  left: 20px;
+  font-size: 12px;
+  color: var(--muted);
+  z-index: 1000;
+}
+
+.author-signature a {
+  color: var(--bch);
+  text-decoration: none;
+  font-weight: 600;
+  transition: color 0.2s;
+}
+
+.author-signature a:hover {
+  color: #fff;
+  text-decoration: underline;
+}

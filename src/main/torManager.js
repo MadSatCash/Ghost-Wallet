@@ -91,16 +91,40 @@ async function downloadAndExtractTor(onProgress) {
   });
 }
 
-function startTor(onLog) {
+let activeSocksPort = null;
+let activeControlPort = null;
+
+function getFreePort() {
   return new Promise((resolve, reject) => {
-    if (torProcess) {
-      if (isReady) return resolve();
-    }
+    const net = require('net');
+    const srv = net.createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const port = srv.address().port;
+      srv.close(() => resolve(port));
+    });
+    srv.on('error', reject);
+  });
+}
 
-    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+async function startTor(onLog) {
+  if (torProcess) {
+    if (isReady) return;
+    return;
+  }
 
-    const cookiePath = path.join(dataDir, 'control_auth_cookie');
+  if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
+  const cookiePath = path.join(dataDir, 'control_auth_cookie');
+
+  // Buscar dos puertos libres al azar
+  try {
+    activeSocksPort = await getFreePort();
+    activeControlPort = await getFreePort();
+  } catch (e) {
+    throw new Error('No se pudieron asignar puertos locales libres para Tor.');
+  }
+
+  return new Promise((resolve, reject) => {
     let settled = false;
     function finish(fn, val) {
       if (settled) return;
@@ -109,10 +133,10 @@ function startTor(onLog) {
       fn(val);
     }
 
-    onLog('Iniciando proceso Tor...');
+    onLog(`Iniciando proceso Tor en puertos dinámicos SOCKS:${activeSocksPort} y Control:${activeControlPort}...`);
     torProcess = spawn(torExe, [
-      '--SocksPort', '127.0.0.1:9050',
-      '--ControlPort', '127.0.0.1:9051',
+      '--SocksPort', `127.0.0.1:${activeSocksPort}`,
+      '--ControlPort', `127.0.0.1:${activeControlPort}`,
       '--CookieAuthentication', '1',
       '--CookieAuthFile', cookiePath,
       '--DataDirectory', dataDir
@@ -187,7 +211,7 @@ function newCircuit() {
     }
 
     const net = require('net');
-    const sock = net.createConnection(9051, '127.0.0.1', () => {
+    const sock = net.createConnection(activeControlPort, '127.0.0.1', () => {
       sock.write(`AUTHENTICATE ${cookieHex}\r\n`);
       sock.write('SIGNAL NEWNYM\r\n');
       sock.write('QUIT\r\n');
@@ -228,5 +252,6 @@ module.exports = {
   stopTor,
   newCircuit,
   isTorDownloaded,
-  isReady: () => isReady
+  isReady: () => isReady,
+  getSocksPort: () => activeSocksPort
 };
