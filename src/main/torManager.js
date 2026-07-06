@@ -7,11 +7,23 @@ const { app } = require('electron');
 const tar = require('tar');
 
 const TOR_VERSION = '14.0.4';
-const TOR_URL = `https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_VERSION}/tor-expert-bundle-windows-x86_64-${TOR_VERSION}.tar.gz`;
-const EXPECTED_SHA256 = '2d8cd74b24cd87ba7a797b989cff7d6cd7c22ee55ab0a9ee3e99cba637af48e4';
+const TOR_BASE = `https://archive.torproject.org/tor-package-archive/torbrowser/${TOR_VERSION}`;
+
+const PLATFORM_CONFIG = {
+  'win32-x64':    { bundle: `tor-expert-bundle-windows-x86_64-${TOR_VERSION}.tar.gz`, exe: path.join('tor', 'tor.exe'),  sha256: '2d8cd74b24cd87ba7a797b989cff7d6cd7c22ee55ab0a9ee3e99cba637af48e4' },
+  'linux-x64':    { bundle: `tor-expert-bundle-linux-x86_64-${TOR_VERSION}.tar.gz`,   exe: path.join('tor', 'tor'),      sha256: '2a57d288528fffb8f70e551a96adf5ac06d8abf0f74fbdffe4721ea837347233' },
+  'darwin-x64':   { bundle: `tor-expert-bundle-macos-x86_64-${TOR_VERSION}.tar.gz`,   exe: path.join('tor', 'tor'),      sha256: 'ba6d3c925f7e5e5cb6a4880313dacca17a02de076e3a932722fe69afe8335edc' },
+  'darwin-arm64': { bundle: `tor-expert-bundle-macos-aarch64-${TOR_VERSION}.tar.gz`,   exe: path.join('tor', 'tor'),      sha256: '0aa700ae8b6827177371dc1852547ef46444890a190309a8ef2514241c14f31f' },
+};
+
+function getPlatformConfig() {
+  const key = `${process.platform}-${process.arch}`;
+  const cfg = PLATFORM_CONFIG[key];
+  if (!cfg) throw new Error(`Plataforma no soportada: ${key}. Soportadas: ${Object.keys(PLATFORM_CONFIG).join(', ')}`);
+  return cfg;
+}
 
 const torDir = path.join(app.getPath('userData'), 'tor-bin');
-const torExe = path.join(torDir, 'tor', 'tor.exe');
 const dataDir = path.join(torDir, 'data');
 
 let torProcess = null;
@@ -31,19 +43,23 @@ function verifyHash(filePath, expectedHash) {
 }
 
 async function downloadAndExtractTor(onProgress) {
+  const platCfg = getPlatformConfig();
+  const torExe = path.join(torDir, platCfg.exe);
+
   if (fs.existsSync(torExe)) {
-    return true; // Ya existe
+    return true;
   }
 
   if (!fs.existsSync(torDir)) fs.mkdirSync(torDir, { recursive: true });
 
   const tarballPath = path.join(torDir, 'tor.tar.gz');
-  
+  const torUrl = `${TOR_BASE}/${platCfg.bundle}`;
+
   return new Promise((resolve, reject) => {
     onProgress('Descargando motor de red Tor...');
-    
+
     const file = fs.createWriteStream(tarballPath);
-    https.get(TOR_URL, (res) => {
+    https.get(torUrl, (res) => {
       if (res.statusCode !== 200) {
         return reject(new Error('Error al descargar Tor: ' + res.statusCode));
       }
@@ -66,7 +82,7 @@ async function downloadAndExtractTor(onProgress) {
         onProgress('Verificando integridad (hash SHA256)...');
         
         try {
-          const isValid = await verifyHash(tarballPath, EXPECTED_SHA256);
+          const isValid = await verifyHash(tarballPath, platCfg.sha256);
           if (!isValid) {
             throw new Error('FALLO DE SEGURIDAD: El hash SHA256 del binario de Tor descargado no coincide con el hash oficial hardcodeado. Posible ataque MITM. Descarga abortada.');
           }
@@ -112,11 +128,17 @@ async function startTor(onLog) {
     return;
   }
 
+  const platCfg = getPlatformConfig();
+  const torExe = path.join(torDir, platCfg.exe);
+
   if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(torExe, 0o755); } catch (_) {}
+  }
 
   const cookiePath = path.join(dataDir, 'control_auth_cookie');
 
-  // Buscar dos puertos libres al azar
   try {
     activeSocksPort = await getFreePort();
     activeControlPort = await getFreePort();
@@ -243,7 +265,12 @@ function newCircuit() {
 }
 
 function isTorDownloaded() {
-  return fs.existsSync(torExe);
+  try {
+    const platCfg = getPlatformConfig();
+    return fs.existsSync(path.join(torDir, platCfg.exe));
+  } catch (_) {
+    return false;
+  }
 }
 
 module.exports = {

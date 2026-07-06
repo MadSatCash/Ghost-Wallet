@@ -1,58 +1,64 @@
-# Ghost Wallet 👻
+# Ghost Wallet
 
 **Privacy by default. Leave no network trace.**
 
-Ghost Wallet es una billetera SPV (Simplified Payment Verification) para Bitcoin Cash (BCH) construida con Electron y diseñada desde cero con una filosofía de **privacidad extrema**.
+Ghost Wallet is an SPV (Simplified Payment Verification) desktop wallet for Bitcoin Cash (BCH), built with Electron and designed from the ground up with a **privacy-first architecture**.
 
-A diferencia de las billeteras tradicionales que filtran la dirección IP del usuario a los servidores públicos al consultar saldos, Ghost Wallet integra el motor de red **Tor** de forma nativa e invisible.
+Unlike traditional wallets that leak the user's IP address to public servers when checking balances, Ghost Wallet natively integrates the **Tor** network engine — invisibly and automatically.
 
-## Características Principales
+## Features
 
-*   **🕵️‍♂️ Privacidad de Red (Tor Integrado):** Todo el tráfico de red de la billetera viaja forzosamente a través de la red Tor mediante un SOCKS5 Proxy local. El demonio de Tor se gestiona automáticamente.
-*   **🛡️ Fail-Closed por defecto:** La billetera bloquea matemáticamente cualquier intento de conexión directa a Internet (ClearNet). Si Tor no está disponible, la billetera simplemente no se conecta.
-*   **🔄 Rotación de Circuitos:** Permite forzar un "Nuevo Circuito" (`SIGNAL NEWNYM`) para cambiar la identidad de red al instante sin tener que reiniciar la app.
-*   **🔒 Criptografía Local:** Las claves privadas (Frases semilla BIP39 o Secretos Crudos Hexadecimales) nunca abandonan la computadora. La firma de transacciones se realiza de forma 100% offline.
-*   **⚙️ Nodos Fulcrum (SPV):** Utiliza la potente librería `@electrum-cash/network` para interactuar con servidores públicos SPV de forma descentralizada.
-*   **💾 Encriptación AES-256-GCM:** Todas tus billeteras se almacenan localmente encriptadas con contraseña.
+- **Tor-Only Networking (Fail-Closed):** All network traffic is routed through Tor via a local SOCKS5h proxy. If Tor is unavailable, the wallet simply does not connect — no clearnet fallback, ever.
+- **Circuit Rotation:** Force a new Tor circuit (`SIGNAL NEWNYM`) to change your network identity instantly, without restarting the app.
+- **Local Cryptography:** Private keys (BIP39 seed phrases or raw 64-char hex secrets) never leave your computer. Transaction signing is performed 100% offline.
+- **Fiat Price Display:** Real-time BCH price fetched entirely through Tor (Kraken, Bitfinex, CoinGecko, Coinbase, CoinCap) with FX conversion for non-USD currencies.
+- **Multi-Language:** English and Spanish (EN/ES) with a language selector.
+- **Cross-Platform:** Runs on Windows, Linux, and macOS. The Tor expert bundle is downloaded automatically for the detected platform.
+- **SPV via Fulcrum Nodes:** Uses `@electrum-cash/network` to interact with public SPV servers in a decentralized way.
+- **AES-256-GCM Encryption:** Saved wallets are stored locally, encrypted with your password.
 
-## Instalación y Uso
+## Installation
 
-### Prerrequisitos
-*   [Node.js](https://nodejs.org/) (v16 o superior recomendado)
-*   NPM (viene incluido con Node.js)
+### Prerequisites
+- [Node.js](https://nodejs.org/) (v18 or higher recommended)
+- npm (included with Node.js)
 
-### Instrucciones
+### Steps
 
-1. Cloná este repositorio:
+1. Clone this repository:
    ```bash
-   git clone https://github.com/TU-USUARIO/ghost-wallet.git
-   cd ghost-wallet
+   git clone https://github.com/MadSatCash/Ghost-Wallet.git
+   cd Ghost-Wallet
    ```
 
-2. Instalá las dependencias:
+2. Install dependencies:
    ```bash
    npm install
    ```
 
-3. Compilá los estilos (CSS):
-   ```bash
-   npm run build:css
-   ```
-
-4. Ejecutá la billetera:
+3. Run the wallet:
    ```bash
    npm start
    ```
 
-## Arquitectura de Seguridad
-La billetera implementa varias protecciones contra ataques laterales y filtraciones de metadatos:
-*   **CookieAuthentication:** El ControlPort de Tor requiere autenticación por cookie de 32 bytes, impidiendo que procesos locales maliciosos controlen el circuito.
-*   **Socks5h:** La resolución DNS se realiza en el nodo de salida de Tor (remote DNS resolution), evitando fugas de DNS.
-*   **Content-Security-Policy estricta:** La UI bloquea recursos externos o scripts cruzados.
-*   **Bloqueo de Navegación:** El proceso principal de Electron previene la apertura de links en el navegador externo por accidente.
+On first launch, the app will download the Tor expert bundle (~15 MB) for your platform, verify its SHA256 hash against the hardcoded official hash, and start the Tor daemon automatically.
 
-## Contribuir
-Cualquier auditoría de seguridad o *Pull Request* es bienvenido. Al ser un software que maneja criptomonedas, la revisión de código por parte de la comunidad es el pilar más importante.
+## Security Architecture
+
+- **Fail-Closed Design:** A monkey-patched `ws` module throws on any non-Tor connection attempt — clearnet is mathematically blocked.
+- **CookieAuthentication:** The Tor ControlPort requires 32-byte cookie authentication, preventing malicious local processes from hijacking the circuit.
+- **SOCKS5h (Remote DNS):** DNS resolution happens at the Tor exit node, preventing DNS leaks.
+- **Strict Content-Security-Policy:** The UI blocks all external resources and cross-origin scripts.
+- **Navigation Blocking:** Electron's main process prevents accidental external link opening.
+- **SHA256 Verification:** The Tor binary is verified against a hardcoded hash before extraction — a hash mismatch aborts the process (possible MITM protection).
+
+## Contributing
+
+Security audits and pull requests are welcome. As software that handles cryptocurrency, community code review is the most important pillar.
+
+## Support Development
+
+Help keep this project going: [fundme.cash/campaign/146](https://fundme.cash/campaign/146)
 
 ---
-*Disclaimer: Este software se provee "tal cual". Usalo bajo tu propia responsabilidad.*
+*Disclaimer: This software is provided "as is". Use at your own risk.*
