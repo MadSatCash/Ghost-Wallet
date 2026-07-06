@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('api', {
   fromMnemonic: (mnemonic, opts) => ipcRenderer.invoke('wallet:fromMnemonic', mnemonic, opts),
   fromHex: (hex) => ipcRenderer.invoke('wallet:fromHex', hex),
   getBalance: (address) => ipcRenderer.invoke('net:getBalance', address),
+  getBchPrice: (currencies, force) => ipcRenderer.invoke('net:getBchPrice', currencies, force),
   resolveHexSecret: (hex) => ipcRenderer.invoke('net:resolveHexSecret', hex),
   mnemonicReport: (mnemonic, count) => ipcRenderer.invoke('net:mnemonicReport', mnemonic, count),
   getHdBalance: (id) => ipcRenderer.invoke('wallet:getHdBalance', id),

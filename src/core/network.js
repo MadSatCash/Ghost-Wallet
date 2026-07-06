@@ -166,6 +166,254 @@ async function getTransaction(txid) {
   return res;
 }
 
+const PRICE_CACHE_MS = 5 * 60 * 1000;
+let _priceCache = null;
+
+function normalizeCurrencyCodes(currencies) {
+  const raw = Array.isArray(currencies) ? currencies : String(currencies || '').split(',');
+  const codes = raw.map(code => String(code || '').trim().toLowerCase()).filter(Boolean);
+  return Array.from(new Set(codes.length ? codes : ['usd']));
+}
+
+function normalizePriceMap(map) {
+  const out = {};
+  Object.entries(map || {}).forEach(([code, value]) => {
+    const n = Number(value);
+    if (Number.isFinite(n) && n > 0) out[String(code).toLowerCase()] = n;
+  });
+  return out;
+}
+
+function hasAnyRequestedPrice(prices, requested) {
+  return requested.some(code => Number.isFinite(prices[code]) && prices[code] > 0);
+}
+
+function missingRequestedPrices(prices, requested) {
+  return requested.filter(code => !Number.isFinite(prices[code]) || prices[code] <= 0);
+}
+
+function decodeChunked(raw) {
+  let result = '';
+  let pos = 0;
+  while (pos < raw.length) {
+    const lineEnd = raw.indexOf('\r\n', pos);
+    if (lineEnd === -1) break;
+    const size = parseInt(raw.slice(pos, lineEnd), 16);
+    if (!size || isNaN(size)) break;
+    result += raw.slice(lineEnd + 2, lineEnd + 2 + size);
+    pos = lineEnd + 2 + size + 2;
+  }
+  return result;
+}
+
+// Direct SOCKS5 → TLS → raw HTTP, bypassing socks-proxy-agent entirely.
+// socks-proxy-agent + https.get was failing silently in this Electron/Node combo.
+async function torHttpGet(urlString) {
+  const { SocksClient } = require('socks');
+  const tls = require('tls');
+  const url = new URL(urlString);
+  const hostname = url.hostname;
+  const port = parseInt(url.port) || 443;
+
+  const { socket } = await SocksClient.createConnection({
+    proxy: { host: '127.0.0.1', port: _torPort, type: 5 },
+    command: 'connect',
+    destination: { host: hostname, port },
+    timeout: 20000,
+  });
+
+  const tlsSocket = tls.connect({ socket, servername: hostname });
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) { settled = true; tlsSocket.destroy(); reject(new Error('Timeout (20s)')); }
+    }, 20000);
+
+    function finish(fn, val) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { tlsSocket.destroy(); } catch (_) {}
+      fn(val);
+    }
+
+    tlsSocket.on('secureConnect', () => {
+      const reqPath = url.pathname + (url.search || '');
+      tlsSocket.write(
+        'GET ' + reqPath + ' HTTP/1.1\r\n' +
+        'Host: ' + hostname + '\r\n' +
+        'User-Agent: Mozilla/5.0 (Windows NT 10.0; rv:128.0) Gecko/20100101 Firefox/128.0\r\n' +
+        'Accept: application/json, text/plain, */*\r\n' +
+        'Accept-Encoding: identity\r\n' +
+        'Connection: close\r\n\r\n'
+      );
+    });
+
+    const chunks = [];
+    tlsSocket.on('data', chunk => chunks.push(chunk));
+    tlsSocket.on('end', () => {
+      try {
+        const raw = Buffer.concat(chunks).toString('utf8');
+        const split = raw.indexOf('\r\n\r\n');
+        if (split === -1) { finish(reject, new Error('Malformed HTTP response')); return; }
+
+        const headerBlock = raw.slice(0, split);
+        const statusCode = parseInt(headerBlock.split(' ')[1]);
+        if (statusCode < 200 || statusCode >= 300) {
+          finish(reject, new Error('HTTP ' + statusCode));
+          return;
+        }
+
+        let body = raw.slice(split + 4);
+        if (headerBlock.toLowerCase().includes('transfer-encoding: chunked')) {
+          body = decodeChunked(body);
+        }
+
+        finish(resolve, JSON.parse(body));
+      } catch (e) {
+        finish(reject, new Error('Parse: ' + e.message));
+      }
+    });
+
+    tlsSocket.on('error', err => finish(reject, err));
+  });
+}
+
+async function fetchBchPrice(currencies, options) {
+  if (!_useTor) throw new Error('Tor is required for network access');
+
+  const requested = normalizeCurrencyCodes(currencies);
+  const cacheKey = requested.join(',');
+  const force = options && options.force;
+  if (!force && _priceCache && _priceCache.cacheKey === cacheKey && Date.now() - _priceCache.updatedAt < PRICE_CACHE_MS) {
+    return _priceCache.payload;
+  }
+
+  const errors = [];
+  const prices = {};
+  const sources = [];
+
+  function mergePrices(source, nextPrices) {
+    const clean = normalizePriceMap(nextPrices);
+    Object.assign(prices, clean);
+    if (Object.keys(clean).length) sources.push(source);
+  }
+
+  // 1: Kraken — crypto-native, generally Tor-friendly
+  try {
+    console.log('[Price] Trying Kraken...');
+    const json = await torHttpGet('https://api.kraken.com/0/public/Ticker?pair=BCHUSD,BCHEUR');
+    const result = {};
+    if (json.result) {
+      const usdKey = Object.keys(json.result).find(k => k.includes('USD'));
+      const eurKey = Object.keys(json.result).find(k => k.includes('EUR'));
+      if (usdKey && json.result[usdKey].c) result.usd = json.result[usdKey].c[0];
+      if (eurKey && json.result[eurKey].c) result.eur = json.result[eurKey].c[0];
+    }
+    mergePrices('Kraken', result);
+    console.log('[Price] Kraken OK:', JSON.stringify(result));
+  } catch (e) {
+    console.log('[Price] Kraken failed:', e.message);
+    errors.push('Kraken: ' + e.message);
+  }
+
+  // 2: Bitfinex — crypto exchange, usually accessible from Tor
+  if (!hasAnyRequestedPrice(prices, requested)) {
+    try {
+      console.log('[Price] Trying Bitfinex...');
+      const json = await torHttpGet('https://api-pub.bitfinex.com/v2/tickers?symbols=tBCHUSD');
+      if (Array.isArray(json) && json[0] && json[0].length > 7) {
+        mergePrices('Bitfinex', { usd: json[0][7] });
+        console.log('[Price] Bitfinex OK: USD =', json[0][7]);
+      }
+    } catch (e) {
+      console.log('[Price] Bitfinex failed:', e.message);
+      errors.push('Bitfinex: ' + e.message);
+    }
+  }
+
+  // 3: CoinGecko — supports many fiat pairs but often CloudFlare-protected
+  if (!hasAnyRequestedPrice(prices, requested)) {
+    try {
+      console.log('[Price] Trying CoinGecko...');
+      const cgUrl = new URL('https://api.coingecko.com/api/v3/simple/price');
+      cgUrl.searchParams.set('ids', 'bitcoin-cash');
+      cgUrl.searchParams.set('vs_currencies', requested.join(','));
+      const json = await torHttpGet(cgUrl.toString());
+      if (json['bitcoin-cash']) mergePrices('CoinGecko', json['bitcoin-cash']);
+      console.log('[Price] CoinGecko OK');
+    } catch (e) {
+      console.log('[Price] CoinGecko failed:', e.message);
+      errors.push('CoinGecko: ' + e.message);
+    }
+  }
+
+  // 4: Coinbase
+  if (!hasAnyRequestedPrice(prices, requested) && !prices.usd) {
+    try {
+      console.log('[Price] Trying Coinbase...');
+      const json = await torHttpGet('https://api.coinbase.com/v2/prices/BCH-USD/spot');
+      if (json.data && json.data.amount) mergePrices('Coinbase', { usd: json.data.amount });
+      console.log('[Price] Coinbase OK');
+    } catch (e) {
+      console.log('[Price] Coinbase failed:', e.message);
+      errors.push('Coinbase: ' + e.message);
+    }
+  }
+
+  // 5: CoinCap
+  if (!hasAnyRequestedPrice(prices, requested) && !prices.usd) {
+    try {
+      console.log('[Price] Trying CoinCap...');
+      const json = await torHttpGet('https://api.coincap.io/v2/assets/bitcoin-cash');
+      if (json.data && json.data.priceUsd) mergePrices('CoinCap', { usd: json.data.priceUsd });
+      console.log('[Price] CoinCap OK');
+    } catch (e) {
+      console.log('[Price] CoinCap failed:', e.message);
+      errors.push('CoinCap: ' + e.message);
+    }
+  }
+
+  // FX conversion for non-USD currencies
+  const missing = missingRequestedPrices(prices, requested);
+  if (prices.usd && missing.some(code => code !== 'usd')) {
+    try {
+      console.log('[Price] Fetching FX rates for:', missing.join(','));
+      const json = await torHttpGet('https://open.er-api.com/v6/latest/USD');
+      const rates = json.rates || {};
+      const converted = {};
+      missing.forEach(code => {
+        const rate = rates[code.toUpperCase()];
+        if (Number.isFinite(Number(rate)) && Number(rate) > 0) {
+          converted[code] = prices.usd * Number(rate);
+        }
+      });
+      mergePrices('USD FX', converted);
+      console.log('[Price] FX OK, converted:', Object.keys(converted).join(','));
+    } catch (e) {
+      console.log('[Price] FX failed:', e.message);
+      errors.push('USD FX: ' + e.message);
+    }
+  }
+
+  if (!Object.keys(prices).length) {
+    throw new Error('No se pudo obtener la cotizacion BCH. ' + errors.join(' | '));
+  }
+
+  const payload = {
+    prices,
+    requested,
+    missing: missingRequestedPrices(prices, requested),
+    source: sources.join(' + '),
+    updatedAt: Date.now(),
+    errors,
+  };
+  _priceCache = { cacheKey, updatedAt: Date.now(), payload };
+  console.log('[Price] Final:', sources.join(' + '));
+  return payload;
+}
+
 module.exports = {
   SERVERS,
   getBalance,
@@ -180,5 +428,6 @@ module.exports = {
   getTransaction,
   setUseTor,
   setTorPort,
-  isTorEnabled
+  isTorEnabled,
+  fetchBchPrice,
 };

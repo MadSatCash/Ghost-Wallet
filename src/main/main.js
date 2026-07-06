@@ -16,7 +16,7 @@ function createWindow() {
     minWidth: 820,
     minHeight: 620,
     backgroundColor: '#0e1116',
-    title: 'BCH Wallet',
+    title: 'Ghost Wallet',
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -117,8 +117,9 @@ function registerIpc() {
   ipcMain.handle('wallet:fromMnemonic', (_e, mnemonic, opts) => wallet.addressesFromMnemonic(mnemonic, opts));
   ipcMain.handle('wallet:fromHex', (_e, hex) => wallet.candidatesFromHexSecret(hex));
 
-  // --- Red (saldos) ---
+  // --- Red (saldos y precio) ---
   ipcMain.handle('net:getBalance', (_e, address) => network.getBalance(address));
+  ipcMain.handle('net:getBchPrice', (_e, currencies, force) => network.fetchBchPrice(currencies, { force }));
 
   // Importar secreto de 64: calcula las dos direcciones posibles, consulta el
   // saldo de cada una y elige automaticamente la que tenga fondos.

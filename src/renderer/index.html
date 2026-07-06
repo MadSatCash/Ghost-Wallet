@@ -4,22 +4,28 @@
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;" />
-  <title>BCH Wallet</title>
+  <title>Ghost Wallet</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="logo">BCH</span>
-      <span class="brand-name">Mi Wallet</span>
+      <span class="logo">GW</span>
+      <span class="brand-name">Ghost Wallet</span>
     </div>
-    <div style="display: flex; align-items: center; gap: 1rem;">
-      <label id="tor-toggle-label" style="display: flex; align-items: center; cursor: pointer; font-size: 14px; background: var(--panel); padding: 4px 10px; border-radius: 20px; border: 1px solid var(--border);">
-        <input type="checkbox" id="tor-checkbox" style="margin-right: 6px;">
-        <span id="tor-status-text">Tor Desactivado</span>
-      </label>
-      <button id="btn-new-circuit" class="hidden" style="font-size: 12px; padding: 4px 10px; border-radius: 20px; background: transparent; border: 1px solid var(--bch); color: var(--bch); cursor: pointer;" title="Cambiar la ruta de conexión por la red Tor (New Identity)">&#8635; Nuevo circuito</button>
-      <span class="badge">v0.1 &middot; Privacidad Total</span>
+    <div class="topbar-right">
+      <select id="lang-select" class="topbar-select">
+        <option value="es">ES</option>
+        <option value="en">EN</option>
+      </select>
+      <select id="currency-select" class="topbar-select"></select>
+      <span id="price-status" class="price-status"></span>
+      <button id="btn-refresh-price" class="btn-refresh-price" title="Refresh price">↻</button>
+      <span id="tor-status-label" class="tor-label">
+        <span id="tor-status-text">Iniciando Tor...</span>
+      </span>
+      <button id="btn-new-circuit" class="btn-circuit" disabled data-i18n="new_circuit" data-i18n-title="new_circuit_title" title="Cambiar la ruta de conexión por la red Tor (New Identity)">↻ Nuevo circuito</button>
+      <span class="badge" data-i18n="version_badge">v0.9 &middot; Privacidad Total</span>
     </div>
   </header>
 
@@ -27,52 +33,52 @@
 
     <!-- Pantalla de inicio -->
     <section class="screen active" data-screen="welcome">
-      <h1>Tu billetera Bitcoin Cash</h1>
-      <p class="subtitle">Simple, rapida y con tus claves siempre en tu compu.</p>
+      <h1 data-i18n="welcome_title">Tu billetera Bitcoin Cash</h1>
+      <p class="subtitle" data-i18n="welcome_subtitle">Simple, rapida y con tus claves siempre en tu compu.</p>
 
       <div class="cards">
         <button class="card" data-go="create">
           <span class="card-icon">+</span>
-          <span class="card-title">Crear wallet nueva</span>
-          <span class="card-sub">Genera una frase secreta nueva</span>
+          <span class="card-title" data-i18n="create_wallet">Crear wallet nueva</span>
+          <span class="card-sub" data-i18n="create_wallet_sub">Genera una frase secreta nueva</span>
         </button>
         <button class="card" data-go="import">
           <span class="card-icon">&#8595;</span>
-          <span class="card-title">Importar wallet</span>
-          <span class="card-sub">12 / 24 palabras o tu secreto de 64</span>
+          <span class="card-title" data-i18n="import_wallet">Importar wallet</span>
+          <span class="card-sub" data-i18n="import_wallet_sub">12 / 24 palabras o tu secreto de 64</span>
         </button>
       </div>
 
       <div id="saved-wallets-section" class="hidden">
-        <h3>Tus billeteras guardadas</h3>
+        <h3 data-i18n="saved_wallets_title">Tus billeteras guardadas</h3>
         <div id="saved-wallets-list" class="wallets-list"></div>
       </div>
     </section>
 
     <!-- Crear -->
     <section class="screen" data-screen="create">
-      <button class="back" data-go="welcome">&larr; Volver</button>
-      <h2>Crear wallet nueva</h2>
+      <button class="back" data-go="welcome" data-i18n="back">← Volver</button>
+      <h2 data-i18n="create_title">Crear wallet nueva</h2>
 
       <div class="seg">
-        <button class="seg-btn active" data-ctype="mnemonic">Frase de palabras (BIP39)</button>
-        <button class="seg-btn" data-ctype="hex">Secreto de 64 (estilo Munia)</button>
+        <button class="seg-btn active" data-ctype="mnemonic" data-i18n="type_mnemonic">Frase de palabras (BIP39)</button>
+        <button class="seg-btn" data-ctype="hex" data-i18n="type_hex">Clave cruda de 64 chars (256 bits)</button>
       </div>
 
       <label class="field" id="field-words">
-        <span>Cantidad de palabras</span>
+        <span data-i18n="word_count_label">Cantidad de palabras</span>
         <select id="word-count">
-          <option value="12">12 palabras (recomendado)</option>
-          <option value="15">15 palabras</option>
-          <option value="18">18 palabras</option>
-          <option value="21">21 palabras</option>
-          <option value="24">24 palabras (maxima seguridad)</option>
+          <option value="12" data-i18n="words_12">12 palabras (recomendado)</option>
+          <option value="15" data-i18n="words_15">15 palabras</option>
+          <option value="18" data-i18n="words_18">18 palabras</option>
+          <option value="21" data-i18n="words_21">21 palabras</option>
+          <option value="24" data-i18n="words_24">24 palabras (maxima seguridad)</option>
         </select>
       </label>
 
-      <p class="hint hidden" id="field-hex">
+      <p class="hint hidden" id="field-hex" data-i18n-html="hex_hint">
         Genera un secreto aleatorio de 64 caracteres, igual que el comando
-        <code>secrets.token_hex(32)</code> que usas en Munia.
+        <code>secrets.token_hex(32)</code> en Python.
       </p>
 
       <button class="btn primary" id="btn-generate">Generar frase secreta</button>
@@ -82,21 +88,21 @@
         <div id="mnemonic-grid" class="mnemonic-grid"></div>
         <div id="secret-box"></div>
         <div style="display: flex; gap: 1rem; align-items: center; justify-content: center; flex-wrap: wrap;">
-          <button class="btn secondary" id="btn-copy-mnemonic">Copiar frase</button>
-          <button class="btn" id="btn-saved">Ya lo anote &rarr; ver mi direccion</button>
+          <button class="btn secondary" id="btn-copy-mnemonic" data-i18n="copy_phrase">Copiar frase</button>
+          <button class="btn" id="btn-saved" data-i18n="noted_see_address">Ya lo anoté → ver mi dirección</button>
         </div>
         <div id="create-address" class="address-box hidden"></div>
         <div id="save-create-section" class="save-box hidden">
-          <h3>Guardar esta billetera en esta compu</h3>
+          <h3 data-i18n="save_wallet_title">Guardar esta billetera en esta compu</h3>
           <label class="field">
-            <span>Nombre de la billetera</span>
-            <input type="text" id="save-create-name" placeholder="Ej: Mi Billetera Principal" />
+            <span data-i18n="wallet_name_label">Nombre de la billetera</span>
+            <input type="text" id="save-create-name" data-i18n-placeholder="wallet_name_placeholder_create" placeholder="Ej: Mi Billetera Principal" />
           </label>
           <label class="field">
-            <span>Contraseña de seguridad (para encriptar la clave privada)</span>
-            <input type="password" id="save-create-password" placeholder="Tu contraseña" />
+            <span data-i18n="password_label">Contraseña de seguridad (para encriptar la clave privada)</span>
+            <input type="password" id="save-create-password" data-i18n-placeholder="password_placeholder" placeholder="Tu contraseña" />
           </label>
-          <button class="btn success" id="btn-save-created">Guardar en la compu</button>
+          <button class="btn success" id="btn-save-created" data-i18n="save_button">Guardar en la compu</button>
           <div id="save-create-error" class="error hidden"></div>
         </div>
       </div>
@@ -104,104 +110,106 @@
 
     <!-- Importar -->
     <section class="screen" data-screen="import">
-      <button class="back" data-go="welcome">&larr; Volver</button>
-      <h2>Importar wallet</h2>
-      <p class="subtitle">Pega tus 12/24 palabras, o tu secreto de 64 caracteres.</p>
+      <button class="back" data-go="welcome" data-i18n="back">← Volver</button>
+      <h2 data-i18n="import_title">Importar wallet</h2>
+      <p class="subtitle" data-i18n="import_subtitle">Pega tus 12/24 palabras, o tu secreto de 64 caracteres.</p>
 
       <label class="field">
         <textarea id="import-input" rows="3"
+          data-i18n-placeholder="import_placeholder"
           placeholder="palabra1 palabra2 ...   o   a1b2c3...(64 caracteres)"></textarea>
       </label>
       <div id="import-hint" class="hint"></div>
 
-      <button class="btn primary" id="btn-import">Importar</button>
+      <button class="btn primary" id="btn-import" data-i18n="import_button">Importar</button>
 
       <div id="import-result" class="result hidden"></div>
 
       <div id="save-import-section" class="save-box hidden">
-        <h3>Guardar esta billetera en esta compu</h3>
+        <h3 data-i18n="save_wallet_title">Guardar esta billetera en esta compu</h3>
         <label class="field">
-          <span>Nombre de la billetera</span>
-          <input type="text" id="save-import-name" placeholder="Ej: Importada de Munia" />
+          <span data-i18n="wallet_name_label">Nombre de la billetera</span>
+          <input type="text" id="save-import-name" data-i18n-placeholder="wallet_name_placeholder_import" placeholder="Ej: Importada" />
         </label>
         <label class="field">
-          <span>Contraseña de seguridad (para encriptar la clave privada)</span>
-          <input type="password" id="save-import-password" placeholder="Tu contraseña" />
+          <span data-i18n="password_label">Contraseña de seguridad (para encriptar la clave privada)</span>
+          <input type="password" id="save-import-password" data-i18n-placeholder="password_placeholder" placeholder="Tu contraseña" />
         </label>
-        <button class="btn success" id="btn-save-imported">Guardar en la compu</button>
+        <button class="btn success" id="btn-save-imported" data-i18n="save_button">Guardar en la compu</button>
         <div id="save-import-error" class="error hidden"></div>
       </div>
     </section>
 
     <!-- Detalles de Wallet Guardada -->
     <section class="screen" data-screen="wallet-details">
-      <button class="back" data-go="welcome">&larr; Volver al inicio</button>
+      <button class="back" data-go="welcome" data-i18n="back_home">← Volver al inicio</button>
       <h2 id="details-wallet-name">Detalles de Wallet</h2>
-      <p class="subtitle" id="details-wallet-type">Tipo: Secreto de 64</p>
+      <p class="subtitle" id="details-wallet-type"></p>
 
       <div id="details-balance-container"></div>
       <div id="details-address-container"></div>
-      
+
       <div id="hd-addresses-container" class="hidden" style="margin-top: 1rem; border: 1px solid #333; border-radius: 8px; padding: 1rem;">
-        <h3 style="margin-top: 0;">Direcciones de Recepción</h3>
-        <p class="hint">Usá cualquiera de estas direcciones para recibir BCH. Tu saldo total es la suma de todas ellas.</p>
+        <h3 style="margin-top: 0;" data-i18n="receive_addresses_title">Direcciones de Recepción</h3>
+        <p class="hint" data-i18n="receive_hint">Usá cualquiera de estas direcciones para recibir BCH. Tu saldo total es la suma de todas ellas.</p>
         <div id="hd-addresses-list" style="max-height: 200px; overflow-y: auto; margin-bottom: 1rem;"></div>
-        <button class="btn secondary" id="btn-generate-address" style="width: 100%;">Generar nueva dirección</button>
+        <button class="btn secondary" id="btn-generate-address" style="width: 100%;" data-i18n="generate_address">Generar nueva dirección</button>
       </div>
 
       <div class="details-actions">
-        <button class="btn success" id="btn-go-send">Enviar BCH</button>
-        <button class="btn secondary" id="btn-go-history">Ver historial de pagos</button>
+        <button class="btn success" id="btn-go-send" data-i18n="send_bch">Enviar BCH</button>
+        <button class="btn secondary" id="btn-go-history" data-i18n="view_history">Ver historial de pagos</button>
         <div class="reveal-box">
-          <button class="btn danger" id="btn-reveal-secret">Ver clave privada / semilla</button>
+          <button class="btn danger" id="btn-reveal-secret" data-i18n="reveal_secret">Ver clave privada / semilla</button>
           <div id="reveal-password-field" class="hidden">
             <label class="field">
-              <span>Ingresa tu contraseña para revelar</span>
-              <input type="password" id="reveal-password" placeholder="Tu contraseña" />
+              <span data-i18n="enter_password_reveal">Ingresa tu contraseña para revelar</span>
+              <input type="password" id="reveal-password" data-i18n-placeholder="password_placeholder" placeholder="Tu contraseña" />
             </label>
             <div class="row">
-              <button class="btn" id="btn-confirm-reveal">Confirmar</button>
-              <button class="btn secondary" id="btn-cancel-reveal">Cancelar</button>
+              <button class="btn" id="btn-confirm-reveal" data-i18n="confirm">Confirmar</button>
+              <button class="btn secondary" id="btn-cancel-reveal" data-i18n="cancel">Cancelar</button>
             </div>
           </div>
           <div id="revealed-secret-container" class="hidden result"></div>
         </div>
 
-        <button class="btn danger-outline" id="btn-delete-wallet">Eliminar de esta compu</button>
+        <button class="btn danger-outline" id="btn-delete-wallet" data-i18n="delete_wallet">Eliminar de esta compu</button>
       </div>
     </section>
 
     <!-- Pantalla de Envío -->
     <section class="screen" data-screen="send">
-      <button class="back" data-go="wallet-details">&larr; Volver a los detalles</button>
-      <h2>Enviar BCH</h2>
-      <p class="subtitle">Enviando desde: <span id="send-wallet-name"></span></p>
+      <button class="back" data-go="wallet-details" data-i18n="back_details">← Volver a los detalles</button>
+      <h2 data-i18n="send_title">Enviar BCH</h2>
+      <p class="subtitle"><span data-i18n="sending_from">Enviando desde:</span> <span id="send-wallet-name"></span></p>
 
       <div class="send-box">
         <div id="send-balance-container" class="hint" style="margin-bottom: 16px; color: var(--bch); font-weight: 600; font-size: 15px; text-align: center; background: rgba(10,193,142,0.1); padding: 12px; border-radius: 8px;">
-          Saldo disponible: <span id="send-wallet-balance">...</span> BCH
+          <span data-i18n="available_balance">Saldo disponible:</span> <span id="send-wallet-balance">...</span> BCH
+          <div id="send-balance-fiat" class="fiat-sub"></div>
         </div>
 
         <label class="field">
-          <span>Dirección de destino (bitcoincash:...)</span>
-          <input type="text" id="send-address" placeholder="bitcoincash:qrv7g5..." />
+          <span data-i18n="dest_address_label">Dirección de destino (bitcoincash:...)</span>
+          <input type="text" id="send-address" data-i18n-placeholder="dest_address_placeholder" placeholder="bitcoincash:qrv7g5..." />
         </label>
 
         <label class="field">
           <div style="display: flex; justify-content: space-between; align-items: baseline;">
-            <span>Monto a enviar (BCH)</span>
-            <a href="#" id="btn-send-max" style="color: var(--bch); font-size: 13px; text-decoration: none; font-weight: 700; background: var(--panel-2); padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);">ENVIAR MÁXIMO</a>
+            <span data-i18n="amount_label">Monto a enviar (BCH)</span>
+            <a href="#" id="btn-send-max" style="color: var(--bch); font-size: 13px; text-decoration: none; font-weight: 700; background: var(--panel-2); padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);" data-i18n="send_max">ENVIAR MÁXIMO</a>
           </div>
           <input type="text" inputmode="decimal" id="send-amount" placeholder="0.01" />
           <div id="send-satoshis" class="hint" style="margin-top: 6px; text-align: right; font-family: monospace; font-size: 14px; color: var(--muted);">0 satoshis</div>
         </label>
 
         <label class="field">
-          <span>Contraseña de la billetera (para firmar la transacción)</span>
-          <input type="password" id="send-password" placeholder="Tu contraseña" />
+          <span data-i18n="send_password_label">Contraseña de la billetera (para firmar la transacción)</span>
+          <input type="password" id="send-password" data-i18n-placeholder="password_placeholder" placeholder="Tu contraseña" />
         </label>
 
-        <button class="btn primary" id="btn-confirm-send">Confirmar y Enviar</button>
+        <button class="btn primary" id="btn-confirm-send" data-i18n="confirm_send">Confirmar y Enviar</button>
       </div>
 
       <div id="send-status" class="hint hidden"></div>
@@ -211,20 +219,19 @@
 
     <!-- Pantalla de Historial -->
     <section class="screen" data-screen="history">
-      <button class="back" data-go="wallet-details">&larr; Volver a los detalles</button>
-      <h2>Historial de Pagos</h2>
-      <p class="subtitle">Billetera: <span id="history-wallet-name"></span></p>
+      <button class="back" data-go="wallet-details" data-i18n="back_details">← Volver a los detalles</button>
+      <h2 data-i18n="history_title">Historial de Pagos</h2>
+      <p class="subtitle"><span data-i18n="history_wallet">Billetera:</span> <span id="history-wallet-name"></span></p>
 
-      <div id="history-container" style="margin-top: 20px;">
-        <!-- The list of transactions will be generated here -->
-      </div>
+      <div id="history-container" style="margin-top: 20px;"></div>
     </section>
   </main>
 
   <footer class="author-signature">
-    Creado por <a href="https://munia.cash/profile/madsatcash" target="_blank">MadSatCash</a>
+    <span data-i18n="created_by">Creado por</span> <a href="https://munia.cash/profile/madsatcash" target="_blank">MadSatCash</a>
   </footer>
 
+  <script src="i18n.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

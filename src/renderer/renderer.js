@@ -1,16 +1,210 @@
-// Frontend de la wallet. Solo maneja la interfaz; toda la criptografia la
-// pide al proceso principal via window.api (ver preload.js). Sin acceso a Node.
-
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
+// --- Inicializar selectores de idioma y moneda ---
+const langSelect = $('#lang-select');
+const currencySelect = $('#currency-select');
+const priceStatus = $('#price-status');
+let priceRequestId = 0;
+let priceLoadPromise = null;
+let priceRetryTimer = null;
+let lastPriceError = '';
+let torState = 'starting';
+
+langSelect.value = getLang();
+CURRENCIES.forEach(function(c) {
+  const opt = document.createElement('option');
+  opt.value = c.code;
+  opt.textContent = c.code + ' (' + c.symbol + ')';
+  currencySelect.appendChild(opt);
+});
+currencySelect.value = getCurrency();
+
+function setPriceStatus(text, state, title) {
+  if (!priceStatus) return;
+  priceStatus.textContent = text || '';
+  priceStatus.className = 'price-status' + (state ? ' ' + state : '');
+  priceStatus.title = title || '';
+}
+
+function clearPriceRetry() {
+  if (!priceRetryTimer) return;
+  clearTimeout(priceRetryTimer);
+  priceRetryTimer = null;
+}
+
+function schedulePriceRetry(delayMs) {
+  clearPriceRetry();
+  if (torState !== 'ready') return;
+  priceRetryTimer = setTimeout(function() {
+    priceRetryTimer = null;
+    refreshPriceIfTorReady({ silent: false });
+  }, delayMs || 15000);
+}
+
+function currentFiatPlaceholder() {
+  if (torState === 'disabled') return t('price_waiting_tor');
+  if (torState !== 'ready') return t('price_establishing_network');
+  if (priceLoadPromise) return t('price_loading');
+  if (lastPriceError) return t('price_retrying');
+  return t('price_loading');
+}
+
+function syncTorState(status) {
+  if (status && status.enabled && status.ready) torState = 'ready';
+  else if (status && (status.enabled || status.ready)) torState = 'starting';
+  else torState = 'disabled';
+}
+
+function looksLikeTorReadyMessage(msg) {
+  var text = String(msg || '').toLowerCase();
+  return text.includes('bootstrapped 100%') ||
+    text.includes('100%!') ||
+    text.includes('conectado a la red tor') ||
+    text.includes('connected to the tor network');
+}
+
+function renderPriceStatus() {
+  var price = fmtPricePerBch();
+  if (price) {
+    var key = isUsingFallbackPrice() ? 'price_ready_fallback' : 'price_ready';
+    setPriceStatus(t(key, { price: price, currency: getCurrency() }), 'ok', getPriceSource());
+    return;
+  }
+  if (torState === 'disabled') {
+    setPriceStatus(t('price_waiting_tor'), 'muted');
+    return;
+  }
+  if (torState !== 'ready') {
+    setPriceStatus(t('price_establishing_network'), 'muted');
+    return;
+  }
+  if (priceLoadPromise) {
+    setPriceStatus(t('price_loading'), 'loading');
+    return;
+  }
+  if (lastPriceError) {
+    setPriceStatus(t('price_retrying'), 'warn', lastPriceError);
+    return;
+  }
+  setPriceStatus(t('price_unavailable'), 'bad');
+}
+
+function updateAllFiatDisplays() {
+  document.querySelectorAll('[data-sats]').forEach(function(el) {
+    var fiat = fmtFiat(Number(el.dataset.sats));
+    el.textContent = fiat || currentFiatPlaceholder();
+  });
+}
+
+function withTimeout(promise, ms, message) {
+  var timer;
+  var timeout = new Promise(function(_resolve, reject) {
+    timer = setTimeout(function() {
+      reject(new Error(message));
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(function() {
+    clearTimeout(timer);
+  });
+}
+
+function refreshPrice(options) {
+  options = options || {};
+  if (torState !== 'ready') {
+    renderPriceStatus();
+    updateAllFiatDisplays();
+    return Promise.resolve();
+  }
+  if (priceLoadPromise && !options.force) return priceLoadPromise;
+  var requestId = ++priceRequestId;
+  lastPriceError = '';
+  clearPriceRetry();
+  var allCodes = CURRENCIES.map(function(c) { return c.code.toLowerCase(); }).join(',');
+  var currentPromise = withTimeout(window.api.getBchPrice(allCodes, !!options.force), 35000, 'Price request timed out').then(function(payload) {
+    if (requestId !== priceRequestId) return;
+    setBchPrices(payload);
+    lastPriceError = '';
+    clearPriceRetry();
+  }).catch(function(err) {
+    if (requestId !== priceRequestId) return;
+    console.error('Price fetch failed:', err);
+    lastPriceError = err && err.message ? err.message : String(err);
+    if (!fmtPricePerBch()) schedulePriceRetry();
+  }).finally(function() {
+    if (priceLoadPromise === currentPromise) priceLoadPromise = null;
+    renderPriceStatus();
+    updateAllFiatDisplays();
+  });
+  priceLoadPromise = currentPromise;
+  renderPriceStatus();
+  updateAllFiatDisplays();
+  return currentPromise;
+}
+
+function ensurePriceLoaded(options) {
+  if (fmtPricePerBch()) return Promise.resolve();
+  if (torState !== 'ready') {
+    renderPriceStatus();
+    updateAllFiatDisplays();
+    return Promise.resolve();
+  }
+  return refreshPrice(options);
+}
+
+function refreshPriceIfTorReady(options) {
+  return window.api.torStatus().then(function(s) {
+    syncTorState(s);
+    if (s.enabled && s.ready) return refreshPrice(options);
+    renderPriceStatus();
+    updateAllFiatDisplays();
+  }).catch(function() {
+    torState = 'starting';
+    renderPriceStatus();
+    updateAllFiatDisplays();
+  });
+}
+
+langSelect.addEventListener('change', function() {
+  setLang(langSelect.value);
+  updateGenerateButtonText();
+  if (torState === 'ready') {
+    setTorConnectedUI();
+  } else if (torState === 'disabled') {
+    setTorDisconnectedUI();
+  } else {
+    setTorStartingUI();
+  }
+  renderPriceStatus();
+  updateAllFiatDisplays();
+});
+
+currencySelect.addEventListener('change', function() {
+  setCurrency(currencySelect.value);
+  updateAllFiatDisplays();
+  renderPriceStatus();
+  if (getDisplayedPriceCode() !== getCurrency()) refreshPriceIfTorReady({ silent: false });
+});
+
+var refreshPriceBtn = $('#btn-refresh-price');
+refreshPriceBtn.addEventListener('click', function() {
+  if (torState !== 'ready') return;
+  refreshPriceBtn.classList.add('spinning');
+  refreshPrice({ force: true }).finally(function() {
+    refreshPriceBtn.classList.remove('spinning');
+  });
+});
+
+applyTranslations();
+renderPriceStatus();
+refreshPriceIfTorReady({ silent: true });
+
 // --- Navegacion entre pantallas ---
 function goTo(name) {
-  $$('.screen').forEach((s) => s.classList.toggle('active', s.dataset.screen === name));
-  
+  $$('.screen').forEach(function(s) { s.classList.toggle('active', s.dataset.screen === name); });
+
   if (name === 'welcome') {
     loadSavedWallets();
-    // Limpiar pantalla Crear
     $('#create-result').classList.add('hidden');
     $('#mnemonic-grid').innerHTML = '';
     $('#secret-box').innerHTML = '';
@@ -21,8 +215,7 @@ function goTo(name) {
     $('#save-create-error').classList.add('hidden');
     currentMnemonic = '';
     currentSecret = '';
-    
-    // Limpiar pantalla Importar
+
     $('#import-input').value = '';
     $('#import-hint').textContent = '';
     $('#import-hint').className = 'hint';
@@ -33,29 +226,30 @@ function goTo(name) {
     $('#save-import-error').classList.add('hidden');
   }
 }
-$$('[data-go]').forEach((el) => el.addEventListener('click', () => goTo(el.dataset.go)));
+$$('[data-go]').forEach(function(el) { el.addEventListener('click', function() { goTo(el.dataset.go); }); });
 
 // --- Utilidades de UI ---
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  return String(s).replace(/[&<>"']/g, function(c) {
+    return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+  });
 }
 
 function addressBox(label, address, note) {
-  const box = document.createElement('div');
+  var box = document.createElement('div');
   box.className = 'address-box';
-  box.innerHTML = `
-    <div class="lbl">${escapeHtml(label)}</div>
-    <div class="row">
-      <span class="addr">${escapeHtml(address)}</span>
-      <button class="copy">Copiar</button>
-    </div>
-    ${note ? `<div class="muted-note">${escapeHtml(note)}</div>` : ''}`;
-  const btn = box.querySelector('.copy');
-  btn.addEventListener('click', async () => {
+  box.innerHTML =
+    '<div class="lbl">' + escapeHtml(label) + '</div>' +
+    '<div class="row">' +
+      '<span class="addr">' + escapeHtml(address) + '</span>' +
+      '<button class="copy">' + t('copy') + '</button>' +
+    '</div>' +
+    (note ? '<div class="muted-note">' + escapeHtml(note) + '</div>' : '');
+  var btn = box.querySelector('.copy');
+  btn.addEventListener('click', async function() {
     await navigator.clipboard.writeText(address);
-    btn.textContent = 'Copiado!';
-    setTimeout(() => (btn.textContent = 'Copiar'), 1200);
+    btn.textContent = t('copied');
+    setTimeout(function() { btn.textContent = t('copy'); }, 1200);
   });
   return box;
 }
@@ -64,38 +258,42 @@ function fmtBch(sats) {
   return (sats / 1e8).toFixed(8).replace(/\.?0+$/, '') + ' BCH';
 }
 
-// Encabezado grande con el saldo total.
 function balanceHead(confirmed, unconfirmed) {
-  const total = (confirmed || 0) + (unconfirmed || 0);
-  const el = document.createElement('div');
+  var total = (confirmed || 0) + (unconfirmed || 0);
+  var el = document.createElement('div');
   el.className = 'balance-head';
-  el.innerHTML = `
-    <div class="balance-label">Saldo total</div>
-    <div class="balance-amount">${escapeHtml(fmtBch(total))}</div>
-    ${unconfirmed ? `<div class="balance-pending">Incluye ${escapeHtml(fmtBch(unconfirmed))} sin confirmar</div>` : ''}`;
+  var fiat = fmtFiat(total) || currentFiatPlaceholder();
+  ensurePriceLoaded({ silent: true }).then(updateAllFiatDisplays);
+  el.innerHTML =
+    '<div class="balance-label">' + t('total_balance') + '</div>' +
+    '<div class="balance-amount">' + escapeHtml(fmtBch(total)) + '</div>' +
+    '<div class="balance-fiat" data-sats="' + total + '">' + escapeHtml(fiat) + '</div>' +
+    (unconfirmed ? '<div class="balance-pending">' + t('includes_unconfirmed', { amount: fmtBch(unconfirmed) }) + '</div>' : '');
   return el;
 }
 
 // =========================== CREAR ===========================
-let createType = 'mnemonic';
-let currentMnemonic = '';
-let currentSecret = '';
+var createType = 'mnemonic';
+var currentMnemonic = '';
+var currentSecret = '';
+updateGenerateButtonText();
 
-// Selector de tipo de wallet a crear (frase de palabras vs secreto de 64).
-$$('.seg-btn').forEach((b) => b.addEventListener('click', () => {
+function updateGenerateButtonText() {
+  $('#btn-generate').textContent = createType === 'mnemonic' ? t('generate_mnemonic') : t('generate_hex');
+}
+
+$$('.seg-btn').forEach(function(b) { b.addEventListener('click', function() {
   createType = b.dataset.ctype;
-  $$('.seg-btn').forEach((x) => x.classList.toggle('active', x === b));
+  $$('.seg-btn').forEach(function(x) { x.classList.toggle('active', x === b); });
   $('#field-words').classList.toggle('hidden', createType !== 'mnemonic');
   $('#field-hex').classList.toggle('hidden', createType !== 'hex');
-  $('#btn-generate').textContent = createType === 'mnemonic'
-    ? 'Generar frase secreta'
-    : 'Generar secreto de 64';
+  updateGenerateButtonText();
   $('#create-result').classList.add('hidden');
-}));
+}); });
 
-$('#btn-generate').addEventListener('click', async () => {
-  const grid = $('#mnemonic-grid');
-  const secretBox = $('#secret-box');
+$('#btn-generate').addEventListener('click', async function() {
+  var grid = $('#mnemonic-grid');
+  var secretBox = $('#secret-box');
   grid.innerHTML = '';
   secretBox.innerHTML = '';
   $('#create-address').classList.add('hidden');
@@ -104,84 +302,80 @@ $('#btn-generate').addEventListener('click', async () => {
 
   if (createType === 'mnemonic') {
     $('#btn-copy-mnemonic').classList.remove('hidden');
-    const words = Number($('#word-count').value);
+    var words = Number($('#word-count').value);
     currentMnemonic = await window.api.generateMnemonic(words);
     currentSecret = '';
-    $('#create-warning').innerHTML = '&#9888; Anota estas palabras en papel y guardalas. ' +
-      'Son la UNICA forma de recuperar tu plata. No se las muestres a nadie ni les saques foto.';
-    currentMnemonic.split(' ').forEach((word, i) => {
-      const el = document.createElement('div');
+    $('#create-warning').textContent = t('warning_mnemonic');
+    currentMnemonic.split(' ').forEach(function(word, i) {
+      var el = document.createElement('div');
       el.className = 'word';
-      el.innerHTML = `<span class="num">${i + 1}</span>${escapeHtml(word)}`;
+      el.innerHTML = '<span class="num">' + (i + 1) + '</span>' + escapeHtml(word);
       grid.appendChild(el);
     });
   } else {
     currentSecret = await window.api.generateHexSecret();
     currentMnemonic = '';
-    $('#create-warning').innerHTML = '&#9888; Guarda este secreto en un lugar muy seguro. ' +
-      'Es la UNICA forma de acceder a tu plata. No se lo muestres a nadie.';
-    const box = document.createElement('div');
+    $('#create-warning').textContent = t('warning_hex');
+    var box = document.createElement('div');
     box.className = 'secret-box';
-    box.innerHTML = `
-      <div class="lbl">Tu secreto (64 caracteres)</div>
-      <div class="row">
-        <span class="secret">${escapeHtml(currentSecret)}</span>
-        <button class="copy" id="copy-secret">Copiar</button>
-      </div>`;
+    box.innerHTML =
+      '<div class="lbl">' + t('your_secret') + '</div>' +
+      '<div class="row">' +
+        '<span class="secret">' + escapeHtml(currentSecret) + '</span>' +
+        '<button class="copy" id="copy-secret">' + t('copy') + '</button>' +
+      '</div>';
     secretBox.appendChild(box);
-    box.querySelector('#copy-secret').addEventListener('click', async (e) => {
+    box.querySelector('#copy-secret').addEventListener('click', async function(e) {
       await navigator.clipboard.writeText(currentSecret);
-      e.target.textContent = 'Copiado!';
-      setTimeout(() => (e.target.textContent = 'Copiar'), 1200);
+      e.target.textContent = t('copied');
+      setTimeout(function() { e.target.textContent = t('copy'); }, 1200);
     });
-    $('#btn-copy-mnemonic').classList.add('hidden'); // Ocultar boton genérico
+    $('#btn-copy-mnemonic').classList.add('hidden');
   }
 
   $('#create-result').classList.remove('hidden');
 });
 
-$('#btn-copy-mnemonic').addEventListener('click', async (e) => {
+$('#btn-copy-mnemonic').addEventListener('click', async function(e) {
   if (currentMnemonic) {
     await navigator.clipboard.writeText(currentMnemonic);
-    const originalText = e.target.textContent;
-    e.target.textContent = '¡Copiado!';
-    setTimeout(() => (e.target.textContent = originalText), 1200);
+    var orig = e.target.textContent;
+    e.target.textContent = t('copied');
+    setTimeout(function() { e.target.textContent = orig; }, 1200);
   }
 });
 
-$('#btn-saved').addEventListener('click', async () => {
-  const target = $('#create-address');
+$('#btn-saved').addEventListener('click', async function() {
+  var target = $('#create-address');
   target.classList.remove('hidden');
-  target.innerHTML = '<div class="loading">Calculando tu direccion...</div>';
+  target.innerHTML = '<div class="loading">' + t('calculating_address') + '</div>';
 
-  let address, label;
+  var address, label;
   if (createType === 'mnemonic') {
-    const addrs = await window.api.fromMnemonic(currentMnemonic, { count: 1 });
+    var addrs = await window.api.fromMnemonic(currentMnemonic, { count: 1 });
     address = addrs[0].address;
-    label = 'Tu primera direccion para recibir BCH';
+    label = t('first_address');
   } else {
-    const cands = await window.api.fromHex(currentSecret);
-    address = cands.find((c) => c.recipe === 'compressed').address;
-    label = 'Tu direccion para recibir BCH (formato estandar)';
+    var cands = await window.api.fromHex(currentSecret);
+    address = cands.find(function(c) { return c.recipe === 'compressed'; }).address;
+    label = t('standard_address');
   }
 
   target.innerHTML = '';
-  const box = addressBox(label, address, 'Comparti esta direccion para recibir pagos.');
+  var box = addressBox(label, address, t('share_address'));
   target.appendChild(box);
 
-  // Mostrar saldo (recien creada: 0, pero confirma que la red responde).
-  const bal = document.createElement('div');
+  var bal = document.createElement('div');
   bal.className = 'muted-note';
-  bal.textContent = 'Consultando saldo...';
+  bal.textContent = t('checking_balance');
   box.appendChild(bal);
   try {
-    const b = await window.api.getBalance(address);
-    bal.textContent = 'Saldo: ' + fmtBch((b.confirmed || 0) + (b.unconfirmed || 0));
-  } catch {
-    bal.textContent = 'Saldo: no pude conectar a la red en este momento.';
+    var b = await window.api.getBalance(address);
+    bal.textContent = t('balance_prefix') + fmtBch((b.confirmed || 0) + (b.unconfirmed || 0));
+  } catch (e) {
+    bal.textContent = t('balance_error');
   }
 
-  // Mostrar sección de guardado
   $('#save-create-name').value = '';
   $('#save-create-password').value = '';
   $('#save-create-error').classList.add('hidden');
@@ -189,65 +383,63 @@ $('#btn-saved').addEventListener('click', async () => {
 });
 
 // =========================== IMPORTAR ===========================
-const importInput = $('#import-input');
-const importHint = $('#import-hint');
+var importInput = $('#import-input');
+var importHint = $('#import-hint');
 
-let hintTimer = null;
-importInput.addEventListener('input', () => {
+var hintTimer = null;
+importInput.addEventListener('input', function() {
   clearTimeout(hintTimer);
   hintTimer = setTimeout(updateHint, 150);
 });
 
 async function updateHint() {
-  const val = importInput.value.trim();
+  var val = importInput.value.trim();
   if (!val) { importHint.textContent = ''; importHint.className = 'hint'; return; }
-  const type = await window.api.detectInput(val);
-  const map = {
-    hex: ['Secreto de 64 caracteres detectado.', 'ok'],
-    mnemonic: ['Frase de palabras valida detectada.', 'ok'],
-    'mnemonic-invalid': ['Parece una frase, pero hay alguna palabra mal escrita.', 'bad'],
-    unknown: ['No reconozco el formato todavia.', 'bad'],
+  var type = await window.api.detectInput(val);
+  var map = {
+    hex: [t('hex_detected'), 'ok'],
+    mnemonic: [t('mnemonic_detected'), 'ok'],
+    'mnemonic-invalid': [t('mnemonic_invalid'), 'bad'],
+    unknown: [t('unknown_format'), 'bad'],
   };
-  const [msg, cls] = map[type] || ['', 'hint'];
-  importHint.textContent = msg;
-  importHint.className = 'hint ' + cls;
+  var entry = map[type] || ['', 'hint'];
+  importHint.textContent = entry[0];
+  importHint.className = 'hint ' + entry[1];
 }
 
-$('#btn-import').addEventListener('click', async () => {
-  const val = importInput.value.trim();
-  const out = $('#import-result');
+$('#btn-import').addEventListener('click', async function() {
+  var val = importInput.value.trim();
+  var out = $('#import-result');
   out.classList.remove('hidden');
-  if (!val) { out.innerHTML = '<div class="error">Pega tu frase o tu secreto primero.</div>'; return; }
+  if (!val) { out.innerHTML = '<div class="error">' + t('paste_first') + '</div>'; return; }
   $('#save-import-section').classList.add('hidden');
 
-  const type = await window.api.detectInput(val);
+  var type = await window.api.detectInput(val);
   if (type !== 'hex' && type !== 'mnemonic') {
-    out.innerHTML = '<div class="error">No pude reconocer eso como una frase valida ' +
-      'ni como un secreto de 64 caracteres. Revisalo e intenta de nuevo.</div>';
+    out.innerHTML = '<div class="error">' + t('unrecognized_input') + '</div>';
     return;
   }
 
-  out.innerHTML = '<div class="loading">Conectando a la red BCH y consultando tu saldo...</div>';
+  out.innerHTML = '<div class="loading">' + t('connecting_network') + '</div>';
 
   try {
     if (type === 'hex') {
-      // Auto-deteccion: prueba las dos recetas y elige la que tenga fondos.
-      const r = await window.api.resolveHexSecret(val);
-      const chosen = r.candidates.find((c) => c.recipe === r.chosenRecipe);
-      const other = r.candidates.find((c) => c.recipe !== r.chosenRecipe);
-      const total = chosen.confirmed + chosen.unconfirmed;
+      var r = await window.api.resolveHexSecret(val);
+      var chosen = r.candidates.find(function(c) { return c.recipe === r.chosenRecipe; });
+      var other = r.candidates.find(function(c) { return c.recipe !== r.chosenRecipe; });
+      var total = chosen.confirmed + chosen.unconfirmed;
 
       out.innerHTML = '';
       out.appendChild(balanceHead(chosen.confirmed, chosen.unconfirmed));
-      const note = total > 0
-        ? 'Detectamos tu saldo en la version "' + chosen.label.toLowerCase() + '".'
-        : 'No encontramos saldo en ninguna de las dos versiones todavia.';
-      out.appendChild(addressBox('Tu direccion (' + chosen.label + ')', chosen.address, note));
+      var note = total > 0
+        ? t('detected_balance', { version: chosen.label.toLowerCase() })
+        : t('no_balance_found');
+      out.appendChild(addressBox(t('your_address', { label: chosen.label }), chosen.address, note));
       if (other) {
         out.appendChild(addressBox(
-          'Otra version posible (' + other.label + ')',
+          t('other_version', { label: other.label }),
           other.address,
-          'Saldo aqui: ' + fmtBch(other.confirmed + other.unconfirmed),
+          t('balance_here') + fmtBch(other.confirmed + other.unconfirmed)
         ));
       }
       if (r.server) out.appendChild(serverNote(r.server));
@@ -256,7 +448,6 @@ $('#btn-import').addEventListener('click', async () => {
       currentImportedType = 'hex';
       currentImportedAddress = chosen.address;
 
-      // Mostrar sección de guardado
       $('#save-import-name').value = '';
       $('#save-import-password').value = '';
       $('#save-import-error').classList.add('hidden');
@@ -265,25 +456,26 @@ $('#btn-import').addEventListener('click', async () => {
     }
 
     // mnemonic
-    const r = await window.api.mnemonicReport(val, 5);
+    var r = await window.api.mnemonicReport(val, 5);
     out.innerHTML = '';
     out.appendChild(balanceHead(r.total.confirmed, r.total.unconfirmed));
-    const title = document.createElement('p');
-    title.className = 'subtitle';
-    title.textContent = 'Tus primeras direcciones:';
-    out.appendChild(title);
-    r.addresses.forEach((a) => out.appendChild(addressBox(
-      'Direccion #' + (a.index + 1),
-      a.address,
-      'Saldo: ' + fmtBch((a.confirmed || 0) + (a.unconfirmed || 0)),
-    )));
+    var titleEl = document.createElement('p');
+    titleEl.className = 'subtitle';
+    titleEl.textContent = t('first_addresses');
+    out.appendChild(titleEl);
+    r.addresses.forEach(function(a) {
+      out.appendChild(addressBox(
+        t('address_num', { num: a.index + 1 }),
+        a.address,
+        t('balance_prefix') + fmtBch((a.confirmed || 0) + (a.unconfirmed || 0))
+      ));
+    });
     if (r.server) out.appendChild(serverNote(r.server));
 
     currentImportedSecret = val;
     currentImportedType = 'mnemonic';
     currentImportedAddress = r.addresses[0].address;
 
-    // Mostrar sección de guardado
     $('#save-import-name').value = '';
     $('#save-import-password').value = '';
     $('#save-import-error').classList.add('hidden');
@@ -294,23 +486,23 @@ $('#btn-import').addEventListener('click', async () => {
 });
 
 function serverNote(server) {
-  const el = document.createElement('div');
+  var el = document.createElement('div');
   el.className = 'server-note';
-  el.textContent = 'Conectado a ' + server;
+  el.textContent = t('connected_to') + server;
   return el;
 }
 
 // =========================== PERSISTENCIA Y DETALLES ===========================
-let currentImportedSecret = '';
-let currentImportedType = '';
-let currentImportedAddress = '';
-let selectedWalletId = '';
-let currentWalletBalanceSats = 0;
+var currentImportedSecret = '';
+var currentImportedType = '';
+var currentImportedAddress = '';
+var selectedWalletId = '';
+var currentWalletBalanceSats = 0;
 
 async function loadSavedWallets() {
-  const wallets = await window.api.listWallets();
-  const section = $('#saved-wallets-section');
-  const list = $('#saved-wallets-list');
+  var wallets = await window.api.listWallets();
+  var section = $('#saved-wallets-section');
+  var list = $('#saved-wallets-list');
   list.innerHTML = '';
 
   if (wallets.length === 0) {
@@ -319,64 +511,69 @@ async function loadSavedWallets() {
   }
 
   section.classList.remove('hidden');
-  wallets.forEach((w) => {
-    const item = document.createElement('div');
+  wallets.forEach(function(w) {
+    var item = document.createElement('div');
     item.className = 'wallet-item';
-    item.innerHTML = `
-      <div class="wallet-item-info">
-        <span class="wallet-item-name">${escapeHtml(w.name)}</span>
-        <span class="wallet-item-addr">${escapeHtml(w.address)}</span>
-        <span class="wallet-item-type">${w.type === 'hex' ? 'secreto 64' : 'semilla'}</span>
-      </div>
-      <div class="wallet-item-balance" id="bal-${w.id}">... BCH</div>
-    `;
-    item.addEventListener('click', () => showWalletDetails(w.id));
+    item.innerHTML =
+      '<div class="wallet-item-info">' +
+        '<span class="wallet-item-name">' + escapeHtml(w.name) + '</span>' +
+        '<span class="wallet-item-addr">' + escapeHtml(w.address) + '</span>' +
+        '<span class="wallet-item-type">' + (w.type === 'hex' ? t('secret_type_hex') : t('secret_type_mnemonic')) + '</span>' +
+      '</div>' +
+      '<div class="wallet-item-balance-col">' +
+        '<div class="wallet-item-balance" id="bal-' + w.id + '">' + t('loading_bch') + '</div>' +
+        '<div class="wallet-item-fiat" id="fiat-' + w.id + '"></div>' +
+      '</div>';
+    item.addEventListener('click', function() { showWalletDetails(w.id); });
     list.appendChild(item);
 
-    // Consulta de saldo asíncrona en segundo plano
-    window.api.getBalance(w.address).then((b) => {
-      const balEl = document.getElementById(`bal-${w.id}`);
+    window.api.getBalance(w.address).then(function(b) {
+      var balEl = document.getElementById('bal-' + w.id);
+      var fiatEl = document.getElementById('fiat-' + w.id);
       if (balEl) {
-        balEl.textContent = fmtBch((b.confirmed || 0) + (b.unconfirmed || 0));
+        var totalSats = (b.confirmed || 0) + (b.unconfirmed || 0);
+        balEl.textContent = fmtBch(totalSats);
+        if (fiatEl) {
+          fiatEl.dataset.sats = totalSats;
+          fiatEl.textContent = fmtFiat(totalSats) || currentFiatPlaceholder();
+          ensurePriceLoaded({ silent: true }).then(updateAllFiatDisplays);
+        }
       }
-    }).catch(() => {
-      const balEl = document.getElementById(`bal-${w.id}`);
-      if (balEl) {
-        balEl.textContent = 'Error';
-      }
+    }).catch(function() {
+      var balEl = document.getElementById('bal-' + w.id);
+      if (balEl) balEl.textContent = t('error_text');
     });
   });
 }
 
 async function showWalletDetails(id) {
   selectedWalletId = id;
-  const wallets = await window.api.listWallets();
-  const w = wallets.find((x) => x.id === id);
+  var wallets = await window.api.listWallets();
+  var w = wallets.find(function(x) { return x.id === id; });
   if (!w) return;
 
   goTo('wallet-details');
 
   $('#details-wallet-name').textContent = w.name;
-  $('#details-wallet-type').textContent = `Tipo: ${w.type === 'hex' ? 'Secreto de 64 (Munia)' : 'Frase semilla'}`;
-  
-  const addrContainer = $('#details-address-container');
-  const hdContainer = $('#hd-addresses-container');
+  $('#details-wallet-type').textContent = w.type === 'hex' ? t('type_hex_detail') : t('type_mnemonic_detail');
+
+  var addrContainer = $('#details-address-container');
+  var hdContainer = $('#hd-addresses-container');
   addrContainer.innerHTML = '';
-  
+
   if (w.type === 'hex') {
-    addrContainer.appendChild(addressBox('Dirección pública de Bitcoin Cash', w.address, 'Compartí esta dirección para recibir pagos.'));
+    addrContainer.appendChild(addressBox(t('bch_public_address'), w.address, t('share_receive')));
     addrContainer.classList.remove('hidden');
     hdContainer.classList.add('hidden');
   } else {
     addrContainer.classList.add('hidden');
     hdContainer.classList.remove('hidden');
-    $('#hd-addresses-list').innerHTML = '<div class="loading">Cargando direcciones...</div>';
+    $('#hd-addresses-list').innerHTML = '<div class="loading">' + t('loading_addresses') + '</div>';
   }
 
-  const balContainer = $('#details-balance-container');
-  balContainer.innerHTML = '<div class="loading">Consultando saldo de la red...</div>';
+  var balContainer = $('#details-balance-container');
+  balContainer.innerHTML = '<div class="loading">' + t('loading_balance') + '</div>';
 
-  // Ocultar sección de revelar clave por defecto
   $('#reveal-password-field').classList.add('hidden');
   $('#btn-reveal-secret').classList.remove('hidden');
   $('#revealed-secret-container').classList.add('hidden');
@@ -384,28 +581,26 @@ async function showWalletDetails(id) {
   $('#reveal-password').value = '';
 
   try {
-    let b;
+    var b;
     if (w.type === 'hex') {
       b = await window.api.getBalance(w.address);
     } else {
       b = await window.api.getHdBalance(w.id);
-      
-      // Renderizar listado HD
-      const list = $('#hd-addresses-list');
+
+      var list = $('#hd-addresses-list');
       list.innerHTML = '';
-      b.receiveAddresses.forEach(a => {
-        const div = document.createElement('div');
+      b.receiveAddresses.forEach(function(a) {
+        var div = document.createElement('div');
         div.style.padding = '0.5rem';
         div.style.borderBottom = '1px solid #444';
         div.style.display = 'flex';
         div.style.justifyContent = 'space-between';
-        
-        // Check if this address has any balance in the details array
-        const detail = b.details.find(d => d.address === a.address);
-        const balText = detail ? ` (Saldo: ${fmtBch(detail.confirmed + detail.unconfirmed)})` : ' (Sin uso)';
-        
-        div.innerHTML = `<span style="font-family: monospace; font-size: 0.9em; user-select: all;">${a.address}</span>
-                         <span style="color: ${detail ? '#4caf50' : '#888'}; font-size: 0.8em;">${balText}</span>`;
+
+        var detail = b.details.find(function(d) { return d.address === a.address; });
+        var balText = detail ? ' (' + t('balance_prefix') + fmtBch(detail.confirmed + detail.unconfirmed) + ')' : ' (' + t('no_use') + ')';
+
+        div.innerHTML = '<span style="font-family: monospace; font-size: 0.9em; user-select: all;">' + a.address + '</span>' +
+                         '<span style="color: ' + (detail ? '#4caf50' : '#888') + '; font-size: 0.8em;">' + balText + '</span>';
         list.appendChild(div);
       });
     }
@@ -415,196 +610,178 @@ async function showWalletDetails(id) {
     balContainer.appendChild(balanceHead(b.confirmed, b.unconfirmed));
   } catch (err) {
     currentWalletBalanceSats = 0;
-    balContainer.innerHTML = `<div class="error">No pude conectar a la red para ver el saldo: ${escapeHtml(err.message || String(err))}</div>`;
+    balContainer.innerHTML = '<div class="error">' + t('balance_network_error', { error: escapeHtml(err.message || String(err)) }) + '</div>';
   }
 }
 
-$('#btn-generate-address').addEventListener('click', async () => {
-  const wallets = await window.api.listWallets();
-  const w = wallets.find((x) => x.id === selectedWalletId);
+$('#btn-generate-address').addEventListener('click', async function() {
+  var wallets = await window.api.listWallets();
+  var w = wallets.find(function(x) { return x.id === selectedWalletId; });
   if (!w || w.type !== 'mnemonic') return;
-  
-  // Actually, we need a backend function to update the receiveIndex.
-  // Wait, I didn't expose updateWallet or similar.
-  // We can just add an ipc handler 'wallet:incrementReceiveIndex'
+
   await window.api.incrementReceiveIndex(w.id);
   showWalletDetails(w.id);
 });
 
 // Guardado de wallet creada
-$('#btn-save-created').addEventListener('click', async () => {
-  const name = $('#save-create-name').value.trim();
-  const password = $('#save-create-password').value;
-  const errorEl = $('#save-create-error');
+$('#btn-save-created').addEventListener('click', async function() {
+  var name = $('#save-create-name').value.trim();
+  var password = $('#save-create-password').value;
+  var errorEl = $('#save-create-error');
   errorEl.classList.add('hidden');
 
   if (!password) {
-    errorEl.textContent = 'La contraseña es requerida para encriptar tu clave.';
+    errorEl.textContent = t('password_required');
     errorEl.classList.remove('hidden');
     return;
   }
 
   try {
-    let secret = createType === 'mnemonic' ? currentMnemonic : currentSecret;
-    let address;
+    var secret = createType === 'mnemonic' ? currentMnemonic : currentSecret;
+    var address;
     if (createType === 'mnemonic') {
-      const addrs = await window.api.fromMnemonic(currentMnemonic, { count: 1 });
+      var addrs = await window.api.fromMnemonic(currentMnemonic, { count: 1 });
       address = addrs[0].address;
     } else {
-      const cands = await window.api.fromHex(currentSecret);
-      address = cands.find((c) => c.recipe === 'compressed').address;
+      var cands = await window.api.fromHex(currentSecret);
+      address = cands.find(function(c) { return c.recipe === 'compressed'; }).address;
     }
 
-    await window.api.saveWallet({
-      name,
-      address,
-      type: createType,
-      secret,
-      password
-    });
-
+    await window.api.saveWallet({ name: name, address: address, type: createType, secret: secret, password: password });
     goTo('welcome');
   } catch (err) {
-    errorEl.textContent = err.message || 'Error al guardar la billetera.';
+    errorEl.textContent = err.message || t('save_error');
     errorEl.classList.remove('hidden');
   }
 });
 
 // Guardado de wallet importada
-$('#btn-save-imported').addEventListener('click', async () => {
-  const name = $('#save-import-name').value.trim();
-  const password = $('#save-import-password').value;
-  const errorEl = $('#save-import-error');
+$('#btn-save-imported').addEventListener('click', async function() {
+  var name = $('#save-import-name').value.trim();
+  var password = $('#save-import-password').value;
+  var errorEl = $('#save-import-error');
   errorEl.classList.add('hidden');
 
   if (!password) {
-    errorEl.textContent = 'La contraseña es requerida para encriptar tu clave.';
+    errorEl.textContent = t('password_required');
     errorEl.classList.remove('hidden');
     return;
   }
 
   try {
-    await window.api.saveWallet({
-      name: name,
-      address: currentImportedAddress,
-      type: currentImportedType,
-      secret: currentImportedSecret,
-      password
-    });
-
+    await window.api.saveWallet({ name: name, address: currentImportedAddress, type: currentImportedType, secret: currentImportedSecret, password: password });
     goTo('welcome');
   } catch (err) {
-    errorEl.textContent = err.message || 'Error al guardar la billetera.';
+    errorEl.textContent = err.message || t('save_error');
     errorEl.classList.remove('hidden');
   }
 });
 
 // Revelar claves
-$('#btn-reveal-secret').addEventListener('click', () => {
+$('#btn-reveal-secret').addEventListener('click', function() {
   $('#reveal-password-field').classList.remove('hidden');
   $('#btn-reveal-secret').classList.add('hidden');
   $('#reveal-password').focus();
 });
 
-$('#btn-cancel-reveal').addEventListener('click', () => {
+$('#btn-cancel-reveal').addEventListener('click', function() {
   $('#reveal-password-field').classList.add('hidden');
   $('#btn-reveal-secret').classList.remove('hidden');
   $('#reveal-password').value = '';
 });
 
-$('#btn-confirm-reveal').addEventListener('click', async () => {
-  const password = $('#reveal-password').value;
-  const container = $('#revealed-secret-container');
+$('#btn-confirm-reveal').addEventListener('click', async function() {
+  var password = $('#reveal-password').value;
+  var container = $('#revealed-secret-container');
   container.classList.add('hidden');
   container.innerHTML = '';
 
   if (!password) {
-    alert('Por favor ingresá tu contraseña.');
+    alert(t('enter_password'));
     return;
   }
 
   try {
-    const decrypted = await window.api.decryptWallet(selectedWalletId, password);
+    var decrypted = await window.api.decryptWallet(selectedWalletId, password);
     container.classList.remove('hidden');
-    
-    const wallets = await window.api.listWallets();
-    const w = wallets.find((x) => x.id === selectedWalletId);
-    
+
+    var wallets = await window.api.listWallets();
+    var w = wallets.find(function(x) { return x.id === selectedWalletId; });
+
     if (w.type === 'hex') {
-      container.innerHTML = `
-        <div class="secret-box">
-          <div class="lbl">Tu secreto (64 caracteres)</div>
-          <div class="row">
-            <span class="secret">${escapeHtml(decrypted)}</span>
-            <button class="copy" id="copy-revealed">Copiar</button>
-          </div>
-        </div>`;
+      container.innerHTML =
+        '<div class="secret-box">' +
+          '<div class="lbl">' + t('your_secret') + '</div>' +
+          '<div class="row">' +
+            '<span class="secret">' + escapeHtml(decrypted) + '</span>' +
+            '<button class="copy" id="copy-revealed">' + t('copy') + '</button>' +
+          '</div>' +
+        '</div>';
     } else {
-      const gridHtml = decrypted.split(' ').map((word, i) => `
-        <div class="word"><span class="num">${i + 1}</span>${escapeHtml(word)}</div>
-      `).join('');
-      container.innerHTML = `
-        <div class="warning">⚠️ Anotá estas palabras en papel y no se las muestres a nadie.</div>
-        <div class="mnemonic-grid">${gridHtml}</div>
-      `;
+      var gridHtml = decrypted.split(' ').map(function(word, i) {
+        return '<div class="word"><span class="num">' + (i + 1) + '</span>' + escapeHtml(word) + '</div>';
+      }).join('');
+      container.innerHTML =
+        '<div class="warning">' + t('warning_write_down') + '</div>' +
+        '<div class="mnemonic-grid">' + gridHtml + '</div>';
     }
 
-    const copyBtn = container.querySelector('.copy');
+    var copyBtn = container.querySelector('.copy');
     if (copyBtn) {
-      copyBtn.addEventListener('click', async (e) => {
+      copyBtn.addEventListener('click', async function(e) {
         await navigator.clipboard.writeText(decrypted);
-        e.target.textContent = 'Copiado!';
-        setTimeout(() => (e.target.textContent = 'Copiar'), 1200);
+        e.target.textContent = t('copied');
+        setTimeout(function() { e.target.textContent = t('copy'); }, 1200);
       });
     }
 
     $('#reveal-password-field').classList.add('hidden');
   } catch (err) {
-    alert(err.message || 'Error al descifrar.');
+    alert(err.message || t('decrypt_error'));
   }
 });
 
 // Eliminar wallet
-$('#btn-delete-wallet').addEventListener('click', async () => {
-  if (!confirm('¿Estás seguro de que querés eliminar esta billetera de tu computadora? Asegurate de tener anotado el secreto/semilla, o perderás el acceso a tus fondos para siempre.')) {
-    return;
-  }
+$('#btn-delete-wallet').addEventListener('click', async function() {
+  if (!confirm(t('delete_confirm'))) return;
   await window.api.deleteWallet(selectedWalletId);
   goTo('welcome');
 });
 
 // =========================== HISTORIAL ===========================
-$('#btn-go-history').addEventListener('click', async () => {
+$('#btn-go-history').addEventListener('click', async function() {
   goTo('history');
-  
-  const wallets = await window.api.listWallets();
-  const w = wallets.find((x) => x.id === selectedWalletId);
+
+  var wallets = await window.api.listWallets();
+  var w = wallets.find(function(x) { return x.id === selectedWalletId; });
   if (!w) return;
-  
+
   $('#history-wallet-name').textContent = w.name;
-  const container = $('#history-container');
-  container.innerHTML = '<div class="loading">Descargando el historial detallado de la red (esto puede demorar unos segundos)...</div>';
-  
+  var container = $('#history-container');
+  container.innerHTML = '<div class="loading">' + t('loading_history') + '</div>';
+
   try {
-    const history = await window.api.getHistory(w.id);
+    var history = await window.api.getHistory(w.id);
     container.innerHTML = '';
-    
+
     if (history.length === 0) {
-      container.innerHTML = '<div class="hint" style="text-align: center; padding: 2rem;">No tenés transacciones en esta billetera todavía.</div>';
+      container.innerHTML = '<div class="hint" style="text-align: center; padding: 2rem;">' + t('no_transactions') + '</div>';
       return;
     }
-    
-    history.forEach(tx => {
-      const isPositive = tx.netSats > 0;
-      const bch = (Math.abs(tx.netSats) / 1e8).toFixed(8).replace(/\.?0+$/, '');
-      const sign = isPositive ? '+' : '-';
-      const color = isPositive ? 'var(--bch)' : 'var(--warn-text)';
-      const bg = isPositive ? 'rgba(10,193,142,0.1)' : 'rgba(255,107,107,0.1)';
-      
-      const date = new Date(tx.time * 1000).toLocaleString();
-      const statusText = tx.height <= 0 ? '(Sin confirmar)' : '';
-      
-      const div = document.createElement('div');
+
+    history.forEach(function(tx) {
+      var isPositive = tx.netSats > 0;
+      var bch = (Math.abs(tx.netSats) / 1e8).toFixed(8).replace(/\.?0+$/, '');
+      var sign = isPositive ? '+' : '-';
+      var color = isPositive ? 'var(--bch)' : 'var(--warn-text)';
+      var bg = isPositive ? 'rgba(10,193,142,0.1)' : 'rgba(255,107,107,0.1)';
+
+      var date = new Date(tx.time * 1000).toLocaleString();
+      var statusText = tx.height <= 0 ? ' ' + t('unconfirmed_label') : '';
+      var fiat = fmtFiat(Math.abs(tx.netSats)) || currentFiatPlaceholder();
+      ensurePriceLoaded({ silent: true }).then(updateAllFiatDisplays);
+
+      var div = document.createElement('div');
       div.style.background = 'var(--panel)';
       div.style.border = '1px solid var(--border)';
       div.style.borderRadius = '10px';
@@ -613,114 +790,116 @@ $('#btn-go-history').addEventListener('click', async () => {
       div.style.display = 'flex';
       div.style.justifyContent = 'space-between';
       div.style.alignItems = 'center';
-      
-      div.innerHTML = `
-        <div style="flex: 1; overflow: hidden; margin-right: 15px;">
-          <div style="font-size: 14px; font-weight: 600; margin-bottom: 4px;">
-            ${isPositive ? 'Recibido' : 'Enviado'} <span style="color: var(--muted); font-weight: normal; font-size: 12px; margin-left: 6px;">${date} ${statusText}</span>
-          </div>
-          <div style="font-family: monospace; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${tx.txid}">
-            <a href="https://blockchair.com/bitcoin-cash/transaction/${tx.txid}" target="_blank" style="color: var(--muted); text-decoration: none;">${tx.txid}</a>
-          </div>
-        </div>
-        <div style="background: ${bg}; color: ${color}; padding: 6px 12px; border-radius: 8px; font-weight: bold; font-family: monospace; font-size: 15px; white-space: nowrap;">
-          ${sign}${bch} BCH
-        </div>
-      `;
+
+      div.innerHTML =
+        '<div style="flex: 1; overflow: hidden; margin-right: 15px;">' +
+          '<div style="font-size: 14px; font-weight: 600; margin-bottom: 4px;">' +
+            (isPositive ? t('received') : t('sent')) +
+            ' <span style="color: var(--muted); font-weight: normal; font-size: 12px; margin-left: 6px;">' + date + statusText + '</span>' +
+          '</div>' +
+          '<div style="font-family: monospace; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="' + tx.txid + '">' +
+            '<a href="https://blockchair.com/bitcoin-cash/transaction/' + tx.txid + '" target="_blank" style="color: var(--muted); text-decoration: none;">' + tx.txid + '</a>' +
+          '</div>' +
+        '</div>' +
+        '<div style="text-align: right;">' +
+          '<div style="background: ' + bg + '; color: ' + color + '; padding: 6px 12px; border-radius: 8px; font-weight: bold; font-family: monospace; font-size: 15px; white-space: nowrap;">' +
+            sign + bch + ' BCH' +
+          '</div>' +
+          '<div class="fiat-sub" data-sats="' + Math.abs(tx.netSats) + '" style="text-align: right; margin-top: 4px;">' + escapeHtml(fiat) + '</div>' +
+        '</div>';
       container.appendChild(div);
     });
-    
+
   } catch (err) {
-    container.innerHTML = `<div class="error">Hubo un error cargando el historial: ${escapeHtml(err.message)}</div>`;
+    container.innerHTML = '<div class="error">' + t('history_error', { error: escapeHtml(err.message) }) + '</div>';
   }
 });
 
 // =========================== ENVIAR BCH ===========================
-$('#btn-go-send').addEventListener('click', () => {
+$('#btn-go-send').addEventListener('click', function() {
   $('#send-address').value = '';
   $('#send-amount').value = '';
   $('#send-password').value = '';
   $('#send-error').classList.add('hidden');
   $('#send-status').classList.add('hidden');
   $('#send-result').classList.add('hidden');
-  
-  const nameEl = $('#details-wallet-name').textContent;
+
+  var nameEl = $('#details-wallet-name').textContent;
   $('#send-wallet-name').textContent = nameEl;
 
-  // Actualizar saldo disponible y satoshis
-  $('#send-wallet-balance').textContent = (currentWalletBalanceSats / 1e8).toFixed(8).replace(/\.?0+$/, '');
-  $('#send-satoshis').textContent = '0 satoshis';
+  var bchStr = (currentWalletBalanceSats / 1e8).toFixed(8).replace(/\.?0+$/, '');
+  $('#send-wallet-balance').textContent = bchStr;
+  var sendFiatEl = $('#send-balance-fiat');
+  sendFiatEl.dataset.sats = currentWalletBalanceSats;
+  sendFiatEl.textContent = fmtFiat(currentWalletBalanceSats) || currentFiatPlaceholder();
+  ensurePriceLoaded({ silent: true }).then(updateAllFiatDisplays);
+  $('#send-satoshis').textContent = '0 ' + t('satoshis');
 
   goTo('send');
 });
 
-$('#send-amount').addEventListener('input', (e) => {
-  // Solo permitir números y un separador decimal (. o ,)
-  let val = e.target.value.replace(/[^0-9.,]/g, '');
-  val = val.replace(',', '.'); // Normalizar coma a punto
-  
-  // Evitar múltiples puntos
-  const parts = val.split('.');
+$('#send-amount').addEventListener('input', function(e) {
+  var val = e.target.value.replace(/[^0-9.,]/g, '');
+  val = val.replace(',', '.');
+
+  var parts = val.split('.');
   if (parts.length > 2) {
     val = parts[0] + '.' + parts.slice(1).join('');
   }
-  
+
   if (val !== e.target.value) {
     e.target.value = val;
   }
 
-  const bch = parseFloat(val) || 0;
-  const sats = Math.floor(bch * 1e8);
-  // Formato con separadores de miles
-  $('#send-satoshis').textContent = new Intl.NumberFormat('es-AR').format(sats) + ' satoshis';
+  var bch = parseFloat(val) || 0;
+  var sats = Math.floor(bch * 1e8);
+  $('#send-satoshis').textContent = new Intl.NumberFormat('es-AR').format(sats) + ' ' + t('satoshis');
 });
 
-$('#btn-send-max').addEventListener('click', (e) => {
+$('#btn-send-max').addEventListener('click', function(e) {
   e.preventDefault();
-  // Asumimos un fee generoso de 500 satoshis (para asegurar que pase incluso con varios inputs)
-  // En BCH los fees son bajísimos, usualmente < 300 sats.
-  const estimatedFeeSats = 500;
-  let maxSats = currentWalletBalanceSats - estimatedFeeSats;
+  var estimatedFeeSats = 500;
+  var maxSats = currentWalletBalanceSats - estimatedFeeSats;
   if (maxSats < 0) maxSats = 0;
-  
-  const maxBch = (maxSats / 1e8).toFixed(8);
+
+  var maxBch = (maxSats / 1e8).toFixed(8);
   $('#send-amount').value = maxBch;
-  $('#send-satoshis').textContent = new Intl.NumberFormat('es-AR').format(maxSats) + ' satoshis';
+  $('#send-satoshis').textContent = new Intl.NumberFormat('es-AR').format(maxSats) + ' ' + t('satoshis');
 });
 
-$('#btn-confirm-send').addEventListener('click', async () => {
-  const address = $('#send-address').value.trim();
-  const amount = $('#send-amount').value;
-  const password = $('#send-password').value;
-  
-  const errEl = $('#send-error');
-  const statEl = $('#send-status');
-  const resEl = $('#send-result');
+$('#btn-confirm-send').addEventListener('click', async function() {
+  var address = $('#send-address').value.trim();
+  var amount = $('#send-amount').value;
+  var password = $('#send-password').value;
+
+  var errEl = $('#send-error');
+  var statEl = $('#send-status');
+  var resEl = $('#send-result');
 
   errEl.classList.add('hidden');
   resEl.classList.add('hidden');
   statEl.classList.remove('hidden');
-  statEl.textContent = 'Construyendo transacción y conectando a la red...';
+  statEl.textContent = t('building_tx');
 
   if (!address || !amount || !password) {
     statEl.classList.add('hidden');
-    errEl.textContent = 'Por favor completá todos los campos.';
+    errEl.textContent = t('fill_all_fields');
     errEl.classList.remove('hidden');
     return;
   }
 
   try {
-    const txid = await window.api.sendBch(selectedWalletId, password, address, amount);
+    var txid = await window.api.sendBch(selectedWalletId, password, address, amount);
     statEl.classList.add('hidden');
-    resEl.innerHTML = `
-      <div class="ok" style="color: #4CAF50; font-weight: bold;">¡Transacción enviada con éxito!</div>
-      <div class="hash" style="margin-top: 10px;">TXID:<br> <a href="https://blockchair.com/bitcoin-cash/transaction/${txid}" target="_blank" style="color: #4CAF50; word-break: break-all;">${txid}</a></div>
-      <button class="btn" style="margin-top: 1rem" onclick="document.querySelector('.back[data-go=\\'welcome\\']').click()">Volver al inicio</button>
-    `;
+    resEl.innerHTML =
+      '<div class="ok" style="color: #4CAF50; font-weight: bold;">' + t('tx_success') + '</div>' +
+      '<div class="hash" style="margin-top: 10px;">TXID:<br> <a href="https://blockchair.com/bitcoin-cash/transaction/' + txid + '" target="_blank" style="color: #4CAF50; word-break: break-all;">' + txid + '</a></div>' +
+      '<button class="btn" id="btn-back-after-send" style="margin-top: 1rem">' + t('back_to_home') + '</button>';
     resEl.classList.remove('hidden');
+    document.getElementById('btn-back-after-send').addEventListener('click', function() { goTo('welcome'); });
   } catch (err) {
     statEl.classList.add('hidden');
-    errEl.textContent = err.message || 'Error al enviar BCH.';
+    errEl.textContent = err.message || t('send_error');
     errEl.classList.remove('hidden');
   }
 });
@@ -729,18 +908,18 @@ $('#btn-confirm-send').addEventListener('click', async () => {
 loadSavedWallets();
 
 // Añadir botón de mostrar/ocultar a todos los campos de contraseña
-document.querySelectorAll('input[type="password"]').forEach(input => {
-  const wrapper = document.createElement('div');
+document.querySelectorAll('input[type="password"]').forEach(function(input) {
+  var wrapper = document.createElement('div');
   wrapper.style.position = 'relative';
   wrapper.style.display = 'flex';
   wrapper.style.alignItems = 'center';
-  
+
   input.parentNode.insertBefore(wrapper, input);
   wrapper.appendChild(input);
-  
-  const toggleBtn = document.createElement('button');
+
+  var toggleBtn = document.createElement('button');
   toggleBtn.type = 'button';
-  toggleBtn.textContent = 'Mostrar';
+  toggleBtn.textContent = t('show_password');
   toggleBtn.style.position = 'absolute';
   toggleBtn.style.right = '10px';
   toggleBtn.style.background = 'none';
@@ -749,130 +928,95 @@ document.querySelectorAll('input[type="password"]').forEach(input => {
   toggleBtn.style.cursor = 'pointer';
   toggleBtn.style.fontSize = '12px';
   toggleBtn.style.fontWeight = 'bold';
-  
-  // Evitar que el texto del input se superponga con el botón
+
   input.style.paddingRight = '60px';
-  
-  toggleBtn.addEventListener('click', () => {
+
+  toggleBtn.addEventListener('click', function() {
     if (input.type === 'password') {
       input.type = 'text';
-      toggleBtn.textContent = 'Ocultar';
+      toggleBtn.textContent = t('hide_password');
     } else {
       input.type = 'password';
-      toggleBtn.textContent = 'Mostrar';
+      toggleBtn.textContent = t('show_password');
     }
   });
-  
+
   wrapper.appendChild(toggleBtn);
 });
 
 // =========================== TOR ===========================
-const torCheckbox = $('#tor-checkbox');
-const torStatusText = $('#tor-status-text');
-const torLabel = $('#tor-toggle-label');
-const newCircuitBtn = $('#btn-new-circuit');
+var torStatusText = $('#tor-status-text');
+var torLabel = $('#tor-status-label');
+var newCircuitBtn = $('#btn-new-circuit');
+
+function setTorStartingUI(message) {
+  torState = 'starting';
+  torStatusText.textContent = t('starting_tor');
+  torLabel.title = message || t('starting_tor');
+  torStatusText.style.color = 'var(--warn-text)';
+  torLabel.style.borderColor = 'var(--border)';
+  newCircuitBtn.disabled = true;
+  renderPriceStatus();
+  updateAllFiatDisplays();
+}
 
 function setTorConnectedUI() {
-  torStatusText.textContent = 'Tor Conectado';
+  torState = 'ready';
+  torStatusText.textContent = t('tor_connected');
+  torLabel.title = '';
   torStatusText.style.color = 'var(--bch)';
   torLabel.style.borderColor = 'var(--bch)';
-  newCircuitBtn.classList.remove('hidden');
+  newCircuitBtn.disabled = false;
+  renderPriceStatus();
+  updateAllFiatDisplays();
 }
 
-function setTorDisconnectedUI() {
-  torStatusText.textContent = 'Tor Desactivado';
-  torStatusText.style.color = '';
-  torLabel.style.borderColor = 'var(--border)';
-  newCircuitBtn.classList.add('hidden');
-}
-
-torCheckbox.addEventListener('change', async (e) => {
-  const enable = e.target.checked;
-  torCheckbox.disabled = true;
-  
-  if (enable) {
-    torStatusText.textContent = 'Iniciando Tor...';
-    torStatusText.style.color = 'var(--warn-text)';
-    
-    try {
-      await window.api.enableTor();
-      setTorConnectedUI();
-    } catch (err) {
-      alert('Error al iniciar Tor: ' + err.message);
-      torCheckbox.checked = false;
-      setTorDisconnectedUI();
-    }
-  } else {
-    torStatusText.textContent = 'Desconectando...';
-    await window.api.disableTor();
-    setTorDisconnectedUI();
-  }
-  
-  torCheckbox.disabled = false;
-});
-
-newCircuitBtn.addEventListener('click', async () => {
+newCircuitBtn.addEventListener('click', async function() {
   newCircuitBtn.disabled = true;
-  newCircuitBtn.textContent = 'Rotando...';
+  newCircuitBtn.textContent = t('rotating');
   try {
     await window.api.torNewCircuit();
-    newCircuitBtn.textContent = '✓ Circuito nuevo';
-    setTimeout(() => { newCircuitBtn.textContent = '↻ Nuevo circuito'; }, 2000);
+    newCircuitBtn.textContent = t('circuit_done');
+    setTimeout(function() { newCircuitBtn.textContent = t('new_circuit'); }, 2000);
+    refreshPrice({ silent: false, force: true });
   } catch (err) {
-    alert('Error al rotar circuito: ' + err.message);
-    newCircuitBtn.textContent = '↻ Nuevo circuito';
+    alert(t('circuit_error') + err.message);
+    newCircuitBtn.textContent = t('new_circuit');
   }
   newCircuitBtn.disabled = false;
 });
 
-window.api.onTorProgress((msg) => {
-  if (torCheckbox.checked && msg) {
-    torStatusText.textContent = msg;
+window.api.onTorProgress(function(msg) {
+  if (msg) {
+    if (looksLikeTorReadyMessage(msg)) {
+      setTorConnectedUI();
+      refreshPriceIfTorReady({ silent: false });
+    } else {
+      torStatusText.textContent = t('starting_tor');
+      torLabel.title = msg;
+      torState = 'starting';
+      renderPriceStatus();
+      updateAllFiatDisplays();
+    }
   }
 });
 
-window.api.torStatus().then(async status => {
-  // Solo la primera vez que se abre la app
-  const isDownloaded = await window.api.isTorDownloaded();
-  
-  if (isDownloaded) {
-    // Ya lo tiene. Forzamos auto-activación siempre que arranca.
-    if (!status.enabled) {
-      torCheckbox.checked = true;
-      torStatusText.textContent = 'Iniciando...';
-      torStatusText.style.color = 'var(--warn-text)';
-      try {
-        await window.api.enableTor();
-        setTorConnectedUI();
-      } catch (err) {
-        alert('Error al iniciar Tor: ' + err.message);
-        console.error(err);
-        torCheckbox.checked = false;
-        setTorDisconnectedUI();
-      }
-    } else {
-      if (status.ready) setTorConnectedUI();
-    }
-  } else {
-    // Es la primera vez que usa la app
-    const msg = "Esta billetera está diseñada para proteger tu privacidad ruteando todo su tráfico a través de la red Tor.\n\n" +
-                "¿Deseás descargar e instalar el motor de Tor ahora? (Se bajará la versión oficial de torproject.org)";
-    if (confirm(msg)) {
-      torCheckbox.checked = true;
-      torStatusText.textContent = 'Preparando descarga...';
-      torStatusText.style.color = 'var(--warn-text)';
-      try {
-        await window.api.enableTor();
-        setTorConnectedUI();
-      } catch (err) {
-        alert('Error al instalar Tor: ' + err.message);
-        torCheckbox.checked = false;
-        setTorDisconnectedUI();
-      }
-    } else {
-      alert("Alerta: Optaste por no usar Tor. La billetera no se conectará a la red por razones de privacidad extrema (el modo directo está deshabilitado).");
-      torCheckbox.checked = false;
-      setTorDisconnectedUI();
-    }
+// Tor auto-start — always on
+window.api.torStatus().then(async function(status) {
+  if (status.enabled && status.ready) {
+    setTorConnectedUI();
+    refreshPriceIfTorReady({ silent: false });
+    return;
+  }
+
+  setTorStartingUI(t('starting'));
+  try {
+    await window.api.enableTor();
+    setTorConnectedUI();
+    refreshPriceIfTorReady({ silent: false, force: true });
+  } catch (err) {
+    torStatusText.textContent = t('tor_start_error') + err.message;
+    torStatusText.style.color = '#ff6b6b';
+    console.error('Tor start failed:', err);
   }
 });
