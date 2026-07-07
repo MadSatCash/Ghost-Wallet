@@ -195,6 +195,12 @@ refreshPriceBtn.addEventListener('click', function() {
   });
 });
 
+$('.logo').addEventListener('click', function() {
+  if (torState !== 'ready') return;
+  refreshPrice({ force: true });
+  loadSavedWallets();
+});
+
 applyTranslations();
 renderPriceStatus();
 refreshPriceIfTorReady({ silent: true });
@@ -256,6 +262,17 @@ function addressBox(label, address, note) {
 
 function fmtBch(sats) {
   return (sats / 1e8).toFixed(8).replace(/\.?0+$/, '') + ' BCH';
+}
+
+function fmtSats(sats) {
+  var sep = getLang() === 'es' ? '.' : ',';
+  var str = Math.abs(sats).toString();
+  var result = '';
+  for (var i = str.length - 1, c = 0; i >= 0; i--, c++) {
+    if (c > 0 && c % 3 === 0) result = sep + result;
+    result = str[i] + result;
+  }
+  return result + ' sats';
 }
 
 function balanceHead(confirmed, unconfirmed) {
@@ -514,16 +531,41 @@ async function loadSavedWallets() {
   wallets.forEach(function(w) {
     var item = document.createElement('div');
     item.className = 'wallet-item';
+    var typeLabel = w.type === 'hex'
+      ? t('wallet_tag_single')
+      : t('wallet_tag_hd');
     item.innerHTML =
       '<div class="wallet-item-info">' +
-        '<span class="wallet-item-name">' + escapeHtml(w.name) + '</span>' +
+        '<div class="wallet-item-name-row">' +
+          '<span class="wallet-item-name">' + escapeHtml(w.name) + '</span>' +
+          '<span class="wallet-item-type">' + typeLabel + '</span>' +
+        '</div>' +
         '<span class="wallet-item-addr">' + escapeHtml(w.address) + '</span>' +
-        '<span class="wallet-item-type">' + (w.type === 'hex' ? t('secret_type_hex') : t('secret_type_mnemonic')) + '</span>' +
       '</div>' +
       '<div class="wallet-item-balance-col">' +
         '<div class="wallet-item-balance" id="bal-' + w.id + '">' + t('loading_bch') + '</div>' +
+        '<div class="wallet-item-sats" id="sats-' + w.id + '"></div>' +
         '<div class="wallet-item-fiat" id="fiat-' + w.id + '"></div>' +
+      '</div>' +
+      '<div class="wallet-qr-container" id="qr-' + w.id + '">' +
+        '<div class="wallet-qr-overlay">' +
+          '<span class="wallet-qr-icon">QR</span>' +
+        '</div>' +
+        '<div class="wallet-qr-code"></div>' +
       '</div>';
+
+    var qrContainer = item.querySelector('.wallet-qr-container');
+    qrContainer.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var isRevealed = qrContainer.classList.toggle('revealed');
+      if (isRevealed && !qrContainer.dataset.loaded) {
+        qrContainer.dataset.loaded = '1';
+        window.api.generateQr(w.address).then(function(svg) {
+          qrContainer.querySelector('.wallet-qr-code').innerHTML = svg;
+        });
+      }
+    });
+
     item.addEventListener('click', function() { showWalletDetails(w.id); });
     list.appendChild(item);
 
@@ -533,6 +575,8 @@ async function loadSavedWallets() {
       if (balEl) {
         var totalSats = (b.confirmed || 0) + (b.unconfirmed || 0);
         balEl.textContent = fmtBch(totalSats);
+        var satsEl = document.getElementById('sats-' + w.id);
+        if (satsEl) satsEl.textContent = fmtSats(totalSats);
         if (fiatEl) {
           fiatEl.dataset.sats = totalSats;
           fiatEl.textContent = fmtFiat(totalSats) || currentFiatPlaceholder();

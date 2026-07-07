@@ -29,4 +29,5 @@ contextBridge.exposeInMainWorld('api', {
   deleteWallet: (id) => ipcRenderer.invoke('storage:delete', id),
   decryptWallet: (id, password) => ipcRenderer.invoke('storage:decrypt', id, password),
   sendBch: (id, password, toAddress, amount) => ipcRenderer.invoke('wallet:sendBch', id, password, toAddress, amount),
+  generateQr: (text) => ipcRenderer.invoke('qr:generate', text),
 });

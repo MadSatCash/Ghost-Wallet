@@ -10,7 +10,7 @@
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="logo">GW</span>
+      <img src="logo.png" alt="GW" class="logo">
       <span class="brand-name">Ghost Wallet</span>
     </div>
     <div class="topbar-right">
@@ -25,7 +25,7 @@
         <span id="tor-status-text">Iniciando Tor...</span>
       </span>
       <button id="btn-new-circuit" class="btn-circuit" disabled data-i18n="new_circuit" data-i18n-title="new_circuit_title" title="Cambiar la ruta de conexión por la red Tor (New Identity)">↻ Nuevo circuito</button>
-      <span class="badge" data-i18n="version_badge">v0.9 &middot; Privacidad Total</span>
+      <span class="badge" data-i18n="version_badge">v0.9.3 &middot; Privacidad Total</span>
     </div>
   </header>
 
@@ -68,11 +68,8 @@
       <label class="field" id="field-words">
         <span data-i18n="word_count_label">Cantidad de palabras</span>
         <select id="word-count">
-          <option value="12" data-i18n="words_12">12 palabras (recomendado)</option>
-          <option value="15" data-i18n="words_15">15 palabras</option>
-          <option value="18" data-i18n="words_18">18 palabras</option>
-          <option value="21" data-i18n="words_21">21 palabras</option>
-          <option value="24" data-i18n="words_24">24 palabras (maxima seguridad)</option>
+          <option value="12" data-i18n="words_12">12 palabras (128 bits de entropía)</option>
+          <option value="24" data-i18n="words_24">24 palabras (256 bits — máxima seguridad)</option>
         </select>
       </label>
 

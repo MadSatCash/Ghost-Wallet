@@ -17,6 +17,7 @@ function createWindow() {
     minHeight: 620,
     backgroundColor: '#0e1116',
     title: 'Ghost Wallet',
+    icon: path.join(__dirname, process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -110,6 +111,14 @@ function registerIpc() {
   ipcMain.handle('storage:save', (_e, opts) => storage.saveWallet(opts));
   ipcMain.handle('storage:delete', (_e, id) => storage.deleteWallet(id));
   ipcMain.handle('storage:decrypt', (_e, id, password) => storage.getDecryptedSecret(id, password));
+
+  ipcMain.handle('qr:generate', (_e, text) => {
+    const qr = require('qrcode-generator');
+    const q = qr(0, 'M');
+    q.addData(text);
+    q.make();
+    return q.createSvgTag({ cellSize: 4, margin: 2 });
+  });
 
   ipcMain.handle('wallet:generateMnemonic', (_e, words) => wallet.generateMnemonic(words));
   ipcMain.handle('wallet:generateHexSecret', () => wallet.generateHexSecret());
