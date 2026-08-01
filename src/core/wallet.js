@@ -112,6 +112,35 @@ function generateHexSecret() {
   return require('node:crypto').randomBytes(32).toString('hex');
 }
 
+// Interpreta un secreto hexadecimal de 32 bytes como semilla BIP32 directa.
+// A diferencia de candidatesFromHexSecret, NO lo usa como clave privada final:
+// el primer address sale de m/44'/145'/0'/0/0.
+function hdPrivateKeyFromHexSeed(input) {
+  const bitcore = require('bitcore-lib-cash');
+  const hex = String(input).trim().replace(/^0x/i, '');
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+    throw new Error('La semilla HD debe tener 64 caracteres hexadecimales (32 bytes).');
+  }
+  return bitcore.HDPrivateKey.fromSeed(Buffer.from(hex, 'hex'));
+}
+
+// Deriva direcciones BCH desde una semilla hexadecimal HD de 256 bits.
+function addressesFromHexHd(secret, { account = 0, change = 0, count = 5 } = {}) {
+  const bitcore = require('bitcore-lib-cash');
+  const root = hdPrivateKeyFromHexSeed(secret);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const path = bchPath(account, change, i);
+    const child = root.deriveChild(path);
+    out.push({
+      index: i,
+      path,
+      address: new bitcore.Address(child.publicKey).toString()
+    });
+  }
+  return out;
+}
+
 // Extrae la Clave Pública Extendida (xPub) para la cuenta m/44'/145'/account'
 function getXPubFromMnemonic(mnemonic, account = 0) {
   const bitcore = require('bitcore-lib-cash');
@@ -119,6 +148,13 @@ function getXPubFromMnemonic(mnemonic, account = 0) {
   const seed = bip39.mnemonicToSeedSync(norm);
   const hdPrivateKey = bitcore.HDPrivateKey.fromSeed(seed);
   const accountNode = hdPrivateKey.deriveChild(`m/44'/145'/${account}'`);
+  return accountNode.xpubkey;
+}
+
+// Extrae la xPub de una semilla hexadecimal HD (sin pasar por BIP39).
+function getXPubFromHexHd(secret, account = 0) {
+  const root = hdPrivateKeyFromHexSeed(secret);
+  const accountNode = root.deriveChild(`m/44'/145'/${account}'`);
   return accountNode.xpubkey;
 }
 
@@ -148,10 +184,25 @@ function getPrivateKeyHexForPath(mnemonic, account = 0, change = 0, index = 0) {
   return child.privateKey.toString();
 }
 
+function getPrivateKeyHexForHexHdPath(secret, account = 0, change = 0, index = 0) {
+  const root = hdPrivateKeyFromHexSeed(secret);
+  const child = root.deriveChild(`m/44'/145'/${account}'/${change}/${index}`);
+  return child.privateKey.toString();
+}
+
 // Construye y firma una transaccion usando bitcore-lib-cash
 function buildAndSignTx({ inputs, toAddress, changeAddress, amountSats, feeRate = 1 }) {
   const bitcore = require('bitcore-lib-cash');
   const privateKeys = inputs.map(i => new bitcore.PrivateKey(i.privKeyHex));
+
+  const INPUT_SIZE = 149;
+  const OUTPUT_SIZE = 34;
+  const BASE_SIZE = 10;
+  const DUST_LIMIT = 546;
+
+  if (amountSats < DUST_LIMIT) {
+    throw new Error('El monto a enviar esta por debajo del limite dust de la red (546 sats)');
+  }
 
   const bchUtxos = inputs.map(u => new bitcore.Transaction.UnspentOutput({
     txid: u.tx_hash,
@@ -161,14 +212,29 @@ function buildAndSignTx({ inputs, toAddress, changeAddress, amountSats, feeRate 
     satoshis: u.value
   }));
 
-  const tx = new bitcore.Transaction()
-    .from(bchUtxos)
-    .to(toAddress, amountSats)
-    .change(changeAddress)
-    .feePerByte(feeRate)
-    .sign(privateKeys);
+  const totalIn = inputs.reduce((s, u) => s + u.value, 0);
+  const n = inputs.length;
 
-  return tx.uncheckedSerialize(); // Devuelve el hex en bruto listo para enviar
+  const feeWithChange = Math.ceil((BASE_SIZE + n * INPUT_SIZE + 2 * OUTPUT_SIZE) * feeRate);
+  const change = totalIn - amountSats - feeWithChange;
+
+  const tx = new bitcore.Transaction().from(bchUtxos);
+
+  if (change >= DUST_LIMIT) {
+    tx.to(toAddress, amountSats)
+      .change(changeAddress)
+      .fee(feeWithChange);
+  } else {
+    const feeNoChange = Math.ceil((BASE_SIZE + n * INPUT_SIZE + 1 * OUTPUT_SIZE) * feeRate);
+    if (totalIn < amountSats + feeNoChange) {
+      throw new Error('Insufficient funds to cover the transaction fee');
+    }
+    tx.to(toAddress, amountSats)
+      .fee(totalIn - amountSats);
+  }
+
+  tx.sign(privateKeys);
+  return tx.uncheckedSerialize();
 }
 
 module.exports = {
@@ -182,9 +248,12 @@ module.exports = {
   detectInputType,
   addressFromPrivateKey,
   candidatesFromHexSecret,
+  addressesFromHexHd,
   addressesFromMnemonic,
   getXPubFromMnemonic,
+  getXPubFromHexHd,
   getAddressesFromXPub,
   getPrivateKeyHexForPath,
+  getPrivateKeyHexForHexHdPath,
   buildAndSignTx,
 };

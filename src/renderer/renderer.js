@@ -225,6 +225,9 @@ function goTo(name) {
     $('#import-input').value = '';
     $('#import-hint').textContent = '';
     $('#import-hint').className = 'hint';
+    $('#import-hex-mode').classList.add('hidden');
+    $$('.import-mode-btn').forEach(function(b) { b.classList.remove('active'); });
+    importHexType = '';
     $('#import-result').classList.add('hidden');
     $('#save-import-section').classList.add('hidden');
     $('#save-import-name').value = '';
@@ -289,6 +292,10 @@ function balanceHead(confirmed, unconfirmed) {
   return el;
 }
 
+function isHdWalletType(type) {
+  return type === 'mnemonic' || type === 'hex_hd';
+}
+
 // =========================== CREAR ===========================
 var createType = 'mnemonic';
 var currentMnemonic = '';
@@ -299,11 +306,12 @@ function updateGenerateButtonText() {
   $('#btn-generate').textContent = createType === 'mnemonic' ? t('generate_mnemonic') : t('generate_hex');
 }
 
-$$('.seg-btn').forEach(function(b) { b.addEventListener('click', function() {
+$$('.create-type-seg .seg-btn').forEach(function(b) { b.addEventListener('click', function() {
   createType = b.dataset.ctype;
-  $$('.seg-btn').forEach(function(x) { x.classList.toggle('active', x === b); });
+  $$('.create-type-seg .seg-btn').forEach(function(x) { x.classList.toggle('active', x === b); });
   $('#field-words').classList.toggle('hidden', createType !== 'mnemonic');
   $('#field-hex').classList.toggle('hidden', createType !== 'hex');
+  $('#field-hex-hd').classList.toggle('hidden', createType !== 'hex_hd');
   updateGenerateButtonText();
   $('#create-result').classList.add('hidden');
 }); });
@@ -332,7 +340,7 @@ $('#btn-generate').addEventListener('click', async function() {
   } else {
     currentSecret = await window.api.generateHexSecret();
     currentMnemonic = '';
-    $('#create-warning').textContent = t('warning_hex');
+    $('#create-warning').textContent = createType === 'hex_hd' ? t('warning_hex_hd') : t('warning_hex');
     var box = document.createElement('div');
     box.className = 'secret-box';
     box.innerHTML =
@@ -372,6 +380,10 @@ $('#btn-saved').addEventListener('click', async function() {
     var addrs = await window.api.fromMnemonic(currentMnemonic, { count: 1 });
     address = addrs[0].address;
     label = t('first_address');
+  } else if (createType === 'hex_hd') {
+    var addrs = await window.api.fromHexHd(currentSecret, { count: 1 });
+    address = addrs[0].address;
+    label = t('first_address');
   } else {
     var cands = await window.api.fromHex(currentSecret);
     address = cands.find(function(c) { return c.recipe === 'compressed'; }).address;
@@ -402,6 +414,7 @@ $('#btn-saved').addEventListener('click', async function() {
 // =========================== IMPORTAR ===========================
 var importInput = $('#import-input');
 var importHint = $('#import-hint');
+var importHexType = '';
 
 var hintTimer = null;
 importInput.addEventListener('input', function() {
@@ -411,8 +424,21 @@ importInput.addEventListener('input', function() {
 
 async function updateHint() {
   var val = importInput.value.trim();
-  if (!val) { importHint.textContent = ''; importHint.className = 'hint'; return; }
+  if (!val) {
+    importHint.textContent = '';
+    importHint.className = 'hint';
+    $('#import-hex-mode').classList.add('hidden');
+    $$('.import-mode-btn').forEach(function(b) { b.classList.remove('active'); });
+    importHexType = '';
+    return;
+  }
   var type = await window.api.detectInput(val);
+  var isHex = type === 'hex';
+  $('#import-hex-mode').classList.toggle('hidden', !isHex);
+  if (!isHex) {
+    $$('.import-mode-btn').forEach(function(b) { b.classList.remove('active'); });
+    importHexType = '';
+  }
   var map = {
     hex: [t('hex_detected'), 'ok'],
     mnemonic: [t('mnemonic_detected'), 'ok'],
@@ -423,6 +449,15 @@ async function updateHint() {
   importHint.textContent = entry[0];
   importHint.className = 'hint ' + entry[1];
 }
+
+$$('.import-mode-btn').forEach(function(b) {
+  b.addEventListener('click', function() {
+    importHexType = b.dataset.importHexType;
+    $$('.import-mode-btn').forEach(function(x) { x.classList.toggle('active', x === b); });
+    $('#import-result').classList.add('hidden');
+    $('#save-import-section').classList.add('hidden');
+  });
+});
 
 $('#btn-import').addEventListener('click', async function() {
   var val = importInput.value.trim();
@@ -436,11 +471,15 @@ $('#btn-import').addEventListener('click', async function() {
     out.innerHTML = '<div class="error">' + t('unrecognized_input') + '</div>';
     return;
   }
+  if (type === 'hex' && !importHexType) {
+    out.innerHTML = '<div class="error">' + t('import_hex_mode_required') + '</div>';
+    return;
+  }
 
   out.innerHTML = '<div class="loading">' + t('connecting_network') + '</div>';
 
   try {
-    if (type === 'hex') {
+    if (type === 'hex' && importHexType === 'hex') {
       var r = await window.api.resolveHexSecret(val);
       var chosen = r.candidates.find(function(c) { return c.recipe === r.chosenRecipe; });
       var other = r.candidates.find(function(c) { return c.recipe !== r.chosenRecipe; });
@@ -464,6 +503,34 @@ $('#btn-import').addEventListener('click', async function() {
       currentImportedSecret = val;
       currentImportedType = 'hex';
       currentImportedAddress = chosen.address;
+
+      $('#save-import-name').value = '';
+      $('#save-import-password').value = '';
+      $('#save-import-error').classList.add('hidden');
+      $('#save-import-section').classList.remove('hidden');
+      return;
+    }
+
+    if (type === 'hex' && importHexType === 'hex_hd') {
+      var r = await window.api.hexHdReport(val, 5);
+      out.innerHTML = '';
+      out.appendChild(balanceHead(r.total.confirmed, r.total.unconfirmed));
+      var titleEl = document.createElement('p');
+      titleEl.className = 'subtitle';
+      titleEl.textContent = t('first_addresses');
+      out.appendChild(titleEl);
+      r.addresses.forEach(function(a) {
+        out.appendChild(addressBox(
+          t('address_num', { num: a.index + 1 }),
+          a.address,
+          t('balance_prefix') + fmtBch((a.confirmed || 0) + (a.unconfirmed || 0))
+        ));
+      });
+      if (r.server) out.appendChild(serverNote(r.server));
+
+      currentImportedSecret = val;
+      currentImportedType = 'hex_hd';
+      currentImportedAddress = r.addresses[0].address;
 
       $('#save-import-name').value = '';
       $('#save-import-password').value = '';
@@ -533,7 +600,7 @@ async function loadSavedWallets() {
     item.className = 'wallet-item';
     var typeLabel = w.type === 'hex'
       ? t('wallet_tag_single')
-      : t('wallet_tag_hd');
+      : (w.type === 'hex_hd' ? t('wallet_tag_hex_hd') : t('wallet_tag_hd'));
     item.innerHTML =
       '<div class="wallet-item-info">' +
         '<div class="wallet-item-name-row">' +
@@ -569,7 +636,10 @@ async function loadSavedWallets() {
     item.addEventListener('click', function() { showWalletDetails(w.id); });
     list.appendChild(item);
 
-    window.api.getBalance(w.address).then(function(b) {
+    var balancePromise = isHdWalletType(w.type)
+      ? window.api.getHdBalance(w.id)
+      : window.api.getBalance(w.address);
+    balancePromise.then(function(b) {
       var balEl = document.getElementById('bal-' + w.id);
       var fiatEl = document.getElementById('fiat-' + w.id);
       if (balEl) {
@@ -599,13 +669,15 @@ async function showWalletDetails(id) {
   goTo('wallet-details');
 
   $('#details-wallet-name').textContent = w.name;
-  $('#details-wallet-type').textContent = w.type === 'hex' ? t('type_hex_detail') : t('type_mnemonic_detail');
+  $('#details-wallet-type').textContent = w.type === 'hex'
+    ? t('type_hex_detail')
+    : (w.type === 'hex_hd' ? t('type_hex_hd_detail') : t('type_mnemonic_detail'));
 
   var addrContainer = $('#details-address-container');
   var hdContainer = $('#hd-addresses-container');
   addrContainer.innerHTML = '';
 
-  if (w.type === 'hex') {
+  if (!isHdWalletType(w.type)) {
     addrContainer.appendChild(addressBox(t('bch_public_address'), w.address, t('share_receive')));
     addrContainer.classList.remove('hidden');
     hdContainer.classList.add('hidden');
@@ -626,7 +698,7 @@ async function showWalletDetails(id) {
 
   try {
     var b;
-    if (w.type === 'hex') {
+    if (!isHdWalletType(w.type)) {
       b = await window.api.getBalance(w.address);
     } else {
       b = await window.api.getHdBalance(w.id);
@@ -661,7 +733,7 @@ async function showWalletDetails(id) {
 $('#btn-generate-address').addEventListener('click', async function() {
   var wallets = await window.api.listWallets();
   var w = wallets.find(function(x) { return x.id === selectedWalletId; });
-  if (!w || w.type !== 'mnemonic') return;
+  if (!w || !isHdWalletType(w.type)) return;
 
   await window.api.incrementReceiveIndex(w.id);
   showWalletDetails(w.id);
@@ -685,6 +757,9 @@ $('#btn-save-created').addEventListener('click', async function() {
     var address;
     if (createType === 'mnemonic') {
       var addrs = await window.api.fromMnemonic(currentMnemonic, { count: 1 });
+      address = addrs[0].address;
+    } else if (createType === 'hex_hd') {
+      var addrs = await window.api.fromHexHd(currentSecret, { count: 1 });
       address = addrs[0].address;
     } else {
       var cands = await window.api.fromHex(currentSecret);
@@ -752,7 +827,7 @@ $('#btn-confirm-reveal').addEventListener('click', async function() {
     var wallets = await window.api.listWallets();
     var w = wallets.find(function(x) { return x.id === selectedWalletId; });
 
-    if (w.type === 'hex') {
+    if (w.type !== 'mnemonic') {
       container.innerHTML =
         '<div class="secret-box">' +
           '<div class="lbl">' + t('your_secret') + '</div>' +
@@ -900,15 +975,26 @@ $('#send-amount').addEventListener('input', function(e) {
   $('#send-satoshis').textContent = new Intl.NumberFormat('es-AR').format(sats) + ' ' + t('satoshis');
 });
 
-$('#btn-send-max').addEventListener('click', function(e) {
+$('#btn-send-max').addEventListener('click', async function(e) {
   e.preventDefault();
-  var estimatedFeeSats = 500;
-  var maxSats = currentWalletBalanceSats - estimatedFeeSats;
-  if (maxSats < 0) maxSats = 0;
-
-  var maxBch = (maxSats / 1e8).toFixed(8);
-  $('#send-amount').value = maxBch;
-  $('#send-satoshis').textContent = new Intl.NumberFormat('es-AR').format(maxSats) + ' ' + t('satoshis');
+  var btn = e.currentTarget;
+  var originalText = btn.textContent;
+  btn.textContent = '…';
+  try {
+    var est = await window.api.estimateMaxSend(selectedWalletId);
+    var maxSats = est.maxSats || 0;
+    var maxBch = (maxSats / 1e8).toFixed(8);
+    $('#send-amount').value = maxBch;
+    $('#send-satoshis').textContent = new Intl.NumberFormat('es-AR').format(maxSats) + ' ' + t('satoshis');
+  } catch (err) {
+    var estimatedFeeSats = 2000;
+    var maxSats = Math.max(0, currentWalletBalanceSats - estimatedFeeSats);
+    var maxBch = (maxSats / 1e8).toFixed(8);
+    $('#send-amount').value = maxBch;
+    $('#send-satoshis').textContent = new Intl.NumberFormat('es-AR').format(maxSats) + ' ' + t('satoshis');
+  } finally {
+    btn.textContent = originalText;
+  }
 });
 
 $('#btn-confirm-send').addEventListener('click', async function() {

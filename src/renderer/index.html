@@ -60,9 +60,10 @@
       <button class="back" data-go="welcome" data-i18n="back">← Volver</button>
       <h2 data-i18n="create_title">Crear wallet nueva</h2>
 
-      <div class="seg">
+      <div class="seg create-type-seg">
         <button class="seg-btn active" data-ctype="mnemonic" data-i18n="type_mnemonic">Frase de palabras (BIP39)</button>
-        <button class="seg-btn" data-ctype="hex" data-i18n="type_hex">Clave cruda de 64 chars (256 bits)</button>
+        <button class="seg-btn" data-ctype="hex" data-i18n="type_hex">Clave cruda de 64 chars (Legacy)</button>
+        <button class="seg-btn" data-ctype="hex_hd" data-i18n="type_hex_hd">Semilla HD de 64 chars (256 bits)</button>
       </div>
 
       <label class="field" id="field-words">
@@ -76,6 +77,10 @@
       <p class="hint hidden" id="field-hex" data-i18n-html="hex_hint">
         Genera un secreto aleatorio de 64 caracteres, igual que el comando
         <code>secrets.token_hex(32)</code> en Python.
+      </p>
+
+      <p class="hint hidden" id="field-hex-hd" data-i18n-html="hex_hd_hint">
+        Genera una semilla hexadecimal HD de 256 bits para múltiples direcciones.
       </p>
 
       <button class="btn primary" id="btn-generate">Generar frase secreta</button>
@@ -117,6 +122,14 @@
           placeholder="palabra1 palabra2 ...   o   a1b2c3...(64 caracteres)"></textarea>
       </label>
       <div id="import-hint" class="hint"></div>
+
+      <div id="import-hex-mode" class="hidden">
+        <p class="subtitle" data-i18n="import_hex_mode_question">¿Qué tipo de clave de 64 caracteres estás importando?</p>
+        <div class="seg import-type-seg">
+          <button class="seg-btn import-mode-btn" data-import-hex-type="hex" data-i18n="import_hex_legacy">Legacy · una dirección</button>
+          <button class="seg-btn import-mode-btn" data-import-hex-type="hex_hd" data-i18n="import_hex_hd">HD · múltiples direcciones</button>
+        </div>
+      </div>
 
       <button class="btn primary" id="btn-import" data-i18n="import_button">Importar</button>
 

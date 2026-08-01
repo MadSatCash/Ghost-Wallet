@@ -9,6 +9,127 @@ const network = require('../core/network');
 const storage = require('../core/storage');
 const torManager = require('./torManager');
 
+const isHdWallet = (w) => Boolean(w && (w.type === 'mnemonic' || w.type === 'hex_hd'));
+
+// ============================================================
+// BIP44 gap-limit address discovery
+//
+// Cuando se importa una seed desde otra wallet, no sabemos hasta que indice
+// derivo. El estandar BIP44 dice: escanear direcciones hasta encontrar
+// GAP_LIMIT (20) consecutivas SIN actividad on-chain. Todo antes de esa
+// banda vacia forma parte de la wallet. "Actividad" = tiene tx history,
+// aunque el saldo actual sea 0: una direccion usada y ya gastada sigue
+// contando (BIP44 4.1).
+// ============================================================
+const GAP_LIMIT = 20;
+const DISCOVERY_BATCH_SIZE = 20;
+const DISCOVERY_HARD_CAP = 2000;
+// Umbral de fallas de red por lote / operacion. Por arriba de esto abortamos
+// en vez de reportar "wallet vacia" o "saldo parcial" silenciosamente —
+// mostrar saldo subestimado en una billetera es un failure mode peor que
+// mostrar un error explicito.
+const NETWORK_FAILURE_ABORT_RATIO = 0.5;
+
+// True si la fraccion de fallas justifica abortar la operacion.
+function tooManyNetworkFailures(failures, total) {
+  return total > 0 && failures * 2 > total;
+}
+
+async function discoverHdChain(xpub, branch, startFrom = 0) {
+  const discovered = [];
+  let cursor = startFrom;
+  let consecutiveEmpty = 0;
+  let maxIndexWithActivity = -1;
+  let stopWalking = false;
+
+  while (!stopWalking && discovered.length < DISCOVERY_HARD_CAP) {
+    const batch = wallet.getAddressesFromXPub(xpub, branch, cursor, DISCOVERY_BATCH_SIZE);
+
+    const results = await Promise.all(batch.map(async (a) => {
+      try {
+        const h = await network.getHistory(a.address);
+        return { address: a, historyLength: Array.isArray(h) ? h.length : 0, ok: true };
+      } catch (e) {
+        return { address: a, historyLength: 0, ok: false };
+      }
+    }));
+
+    // Si MAYORIA del batch fallo, la red esta caida/inestable: abortar en
+    // vez de arriesgar a que un gap "empty" en realidad sean fallos y demos
+    // saldo 0 falso a una wallet que tiene fondos.
+    const batchFailures = results.filter(r => !r.ok).length;
+    if (tooManyNetworkFailures(batchFailures, results.length)) {
+      throw new Error('No se pudo consultar la red durante el descubrimiento de direcciones (demasiados fallos en el lote).');
+    }
+
+    for (const r of results) {
+      discovered.push(r.address);
+      if (!r.ok) {
+        // Fallo aislado: no lo contamos como vacio (podria haber tenido
+        // actividad); tampoco reseteamos el gap. Seguimos.
+        continue;
+      }
+      if (r.historyLength > 0) {
+        maxIndexWithActivity = r.address.index;
+        consecutiveEmpty = 0;
+      } else {
+        consecutiveEmpty += 1;
+        if (consecutiveEmpty >= GAP_LIMIT) {
+          stopWalking = true;
+          break;
+        }
+      }
+    }
+
+    cursor += DISCOVERY_BATCH_SIZE;
+  }
+
+  if (discovered.length >= DISCOVERY_HARD_CAP && !stopWalking) {
+    // Wallet enorme (>2000 direcciones activas por rama) — no llegamos al
+    // gap. El saldo reportado puede ser incompleto.
+    console.warn(`[discoverHdChain] Hard cap ${DISCOVERY_HARD_CAP} alcanzado en branch ${branch}. El saldo puede estar subestimado.`);
+  }
+
+  return { addresses: discovered, maxIndexWithActivity };
+}
+
+// Descubre direcciones de ambas ramas y persiste los indices en storage.
+async function resolveHdWalletAddresses(w) {
+  if (!isHdWallet(w) || !w.xpub) throw new Error('Wallet HD no encontrada');
+
+  const [receiveResult, changeResult] = await Promise.all([
+    discoverHdChain(w.xpub, 0, 0),
+    discoverHdChain(w.xpub, 1, 0),
+  ]);
+
+  const rStart = w.receiveIndex || 0;
+  const cStart = w.changeIndex  || 0;
+  const newReceiveIndex = Math.max(rStart, receiveResult.maxIndexWithActivity + 1);
+  const newChangeIndex  = Math.max(cStart, changeResult.maxIndexWithActivity  + 1);
+
+  if (newReceiveIndex !== rStart || newChangeIndex !== cStart) {
+    try {
+      storage.updateWallet(w.id, {
+        receiveIndex: newReceiveIndex,
+        changeIndex: newChangeIndex,
+      });
+    } catch (e) {
+      // Persistir es una optimizacion: no romper la operacion por esto.
+      console.error('No se pudo persistir receiveIndex/changeIndex:', e);
+    }
+  }
+
+  return {
+    receiveAddresses: receiveResult.addresses,
+    changeAddresses: changeResult.addresses,
+    allAddresses: [...receiveResult.addresses, ...changeResult.addresses],
+    receiveIndex: newReceiveIndex,
+    changeIndex: newChangeIndex,
+    maxReceiveActive: receiveResult.maxIndexWithActivity,
+    maxChangeActive:  changeResult.maxIndexWithActivity,
+  };
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 980,
@@ -125,6 +246,7 @@ function registerIpc() {
   ipcMain.handle('wallet:detectInput', (_e, input) => wallet.detectInputType(input));
   ipcMain.handle('wallet:fromMnemonic', (_e, mnemonic, opts) => wallet.addressesFromMnemonic(mnemonic, opts));
   ipcMain.handle('wallet:fromHex', (_e, hex) => wallet.candidatesFromHexSecret(hex));
+  ipcMain.handle('wallet:fromHexHd', (_e, hex, opts) => wallet.addressesFromHexHd(hex, opts));
 
   // --- Red (saldos y precio) ---
   ipcMain.handle('net:getBalance', (_e, address) => network.getBalance(address));
@@ -149,25 +271,23 @@ function registerIpc() {
     return { candidates: withBalance, chosenRecipe: chosen.recipe, server: network.serverName() };
   });
 
-  // Consultar balance total de una billetera HD
+  // Consultar balance total de una billetera HD.
+  // Usa gap-limit discovery para encontrar TODAS las direcciones con actividad
+  // en ambas ramas (receive y change), incluso mas alla del ultimo indice
+  // conocido — necesario cuando la seed viene importada de otra wallet.
   ipcMain.handle('wallet:getHdBalance', async (_e, id) => {
     const wallets = storage.listWalletsPublic();
     const w = wallets.find(x => x.id === id);
     if (!w || !w.xpub) throw new Error('Wallet HD no encontrada');
 
-    const rIndex = w.receiveIndex || 0;
-    const cIndex = w.changeIndex || 0;
-    
-    const receiveAddrs = wallet.getAddressesFromXPub(w.xpub, 0, 0, rIndex + 10);
-    const changeAddrs = wallet.getAddressesFromXPub(w.xpub, 1, 0, cIndex + 10);
-    const allAddrs = [...receiveAddrs, ...changeAddrs];
-    
+    const resolved = await resolveHdWalletAddresses(w);
+
     let confirmed = 0;
     let unconfirmed = 0;
     let details = [];
+    let failures = 0;
 
-    // En paralelo para mayor velocidad
-    const promises = allAddrs.map(async (a) => {
+    const results = await Promise.all(resolved.allAddresses.map(async (a) => {
       try {
         const b = await network.getBalance(a.address);
         if (b.confirmed > 0 || b.unconfirmed !== 0) {
@@ -175,36 +295,129 @@ function registerIpc() {
         }
         return b;
       } catch (err) {
+        failures += 1;
         return { confirmed: 0, unconfirmed: 0 };
       }
-    });
+    }));
 
-    const results = await Promise.all(promises);
+    if (tooManyNetworkFailures(failures, results.length)) {
+      throw new Error('Error de red: fallaron demasiadas consultas de saldo (la wallet podria tener fondos no visibles).');
+    }
+
     for (const b of results) {
       confirmed += b.confirmed;
       unconfirmed += b.unconfirmed;
     }
 
-    return { confirmed, unconfirmed, details, receiveAddresses: receiveAddrs, server: network.serverName() };
+    return {
+      confirmed,
+      unconfirmed,
+      details,
+      receiveAddresses: resolved.receiveAddresses,
+      server: network.serverName()
+    };
   });
 
-  // Importar frase: deriva las primeras direcciones y suma su saldo.
+  // Suma los saldos de una lista de direcciones. Anota `confirmed`/`unconfirmed`
+  // sobre cada address in-place para que el caller pueda mostrarlos.
+  async function sumBalances(addresses) {
+    let failures = 0;
+    const results = await Promise.all(addresses.map(async (a) => {
+      try { return await network.getBalance(a.address); }
+      catch { failures++; return { confirmed: 0, unconfirmed: 0 }; }
+    }));
+    let confirmed = 0, unconfirmed = 0;
+    results.forEach((b, i) => {
+      addresses[i].confirmed = b.confirmed;
+      addresses[i].unconfirmed = b.unconfirmed;
+      confirmed += b.confirmed;
+      unconfirmed += b.unconfirmed;
+    });
+    return { confirmed, unconfirmed, failures };
+  }
+
+  // Reporte de importacion de mnemonic: gap-limit en ambas ramas para no
+  // subestimar el saldo (bug corregido — antes usaba SCAN_LIMIT fijo de 20 y
+  // perdia saldos en indices altos, sobre todo en change).
+  async function hdImportReport(xpub, count) {
+    const [receiveDiscovery, changeDiscovery] = await Promise.all([
+      discoverHdChain(xpub, 0, 0),
+      discoverHdChain(xpub, 1, 0),
+    ]);
+    const rBal = await sumBalances(receiveDiscovery.addresses);
+    const cBal = await sumBalances(changeDiscovery.addresses);
+
+    // Para la UI: primeras `count` de la rama receive. Si el discovery cubrio
+    // menos que `count` (posible solo si count > GAP_LIMIT), completar con
+    // derivacion pura para no romper la vista.
+    let firstAddresses = receiveDiscovery.addresses.slice(0, count);
+    if (firstAddresses.length < count) {
+      const missing = count - firstAddresses.length;
+      const extra = wallet.getAddressesFromXPub(xpub, 0, firstAddresses.length, missing);
+      firstAddresses = [...firstAddresses, ...extra];
+    }
+
+    return {
+      addresses: firstAddresses,
+      total: {
+        confirmed:   rBal.confirmed   + cBal.confirmed,
+        unconfirmed: rBal.unconfirmed + cBal.unconfirmed,
+      },
+      server: network.serverName(),
+    };
+  }
+
   ipcMain.handle('net:mnemonicReport', async (_e, mnemonic, count = 5) => {
-    const addresses = await wallet.addressesFromMnemonic(mnemonic, { count });
-    let confirmed = 0;
-    let unconfirmed = 0;
-    for (const a of addresses) {
-      try {
-        const b = await network.getBalance(a.address);
-        a.confirmed = b.confirmed;
-        a.unconfirmed = b.unconfirmed;
-        confirmed += b.confirmed;
-        unconfirmed += b.unconfirmed;
-      } catch (e) {
-        a.error = String(e.message || e);
+    const xpub = wallet.getXPubFromMnemonic(mnemonic);
+    return hdImportReport(xpub, count);
+  });
+
+  ipcMain.handle('net:hexHdReport', async (_e, secret, count = 5) => {
+    const xpub = wallet.getXPubFromHexHd(secret);
+    return hdImportReport(xpub, count);
+  });
+
+  // Estimar el maximo enviable calculando el fee real segun cantidad de UTXOs.
+  // No necesita el password: solo mira los UTXOs. Coincide con la formula
+  // usada por buildAndSignTx cuando el change seria dust (send-max).
+  ipcMain.handle('wallet:estimateMaxSend', async (_e, id) => {
+    const wallets = storage.listWalletsPublic();
+    const w = wallets.find(x => x.id === id);
+    if (!w) throw new Error('Wallet no encontrada');
+
+    const DUST_LIMIT = 546;
+    let utxos = [];
+    if (!isHdWallet(w)) {
+      const u = await network.getUtxos(w.address);
+      if (u) utxos = u;
+    } else {
+      const resolved = await resolveHdWalletAddresses(w);
+      let failures = 0;
+      const promises = resolved.allAddresses.map(async (a) => {
+        try {
+          const u = await network.getUtxos(a.address);
+          if (u && u.length > 0) u.forEach(x => utxos.push(x));
+        } catch (e) { failures++; }
+      });
+      await Promise.all(promises);
+      if (tooManyNetworkFailures(failures, resolved.allAddresses.length)) {
+        throw new Error('Error de red: fallaron demasiadas consultas de UTXOs (el maximo enviable podria estar subestimado).');
       }
     }
-    return { addresses, total: { confirmed, unconfirmed }, server: network.serverName() };
+
+    const totalSats = utxos.reduce((s, u) => s + u.value, 0);
+    const n = utxos.length;
+    const BASE_SIZE = 10;
+    const INPUT_SIZE = 149;
+    const OUTPUT_SIZE = 34;
+    const feeRate = 1;
+    const feeSats = n === 0
+      ? 0
+      : Math.ceil((BASE_SIZE + n * INPUT_SIZE + 1 * OUTPUT_SIZE) * feeRate);
+    let maxSats = Math.max(0, totalSats - feeSats);
+    if (maxSats < DUST_LIMIT) maxSats = 0;
+
+    return { totalSats, feeSats, maxSats, utxoCount: n };
   });
 
   // Enviar BCH
@@ -216,34 +429,50 @@ function registerIpc() {
     const secret = storage.getDecryptedSecret(id, password);
     let inputs = [];
     let changeAddress;
+    // Guardamos aca el proximo changeIndex a persistir tras un envio exitoso.
+    // Base = resolved.changeIndex (post-discovery), NO w.changeIndex, que
+    // pudo haber quedado desactualizado si la seed viene importada.
+    let nextChangeIndexToPersist = null;
 
-    if (w.type === 'hex') {
+    if (!isHdWallet(w)) {
       const u = await network.getUtxos(w.address);
       if (!u || u.length === 0) throw new Error('No hay fondos suficientes (0 UTXOs).');
       u.forEach(x => inputs.push({ ...x, address: w.address, privKeyHex: secret }));
       changeAddress = w.address;
     } else {
-      const rIndex = w.receiveIndex || 0;
-      const cIndex = w.changeIndex || 0;
-      const receiveAddrs = wallet.getAddressesFromXPub(w.xpub, 0, 0, rIndex + 10);
-      const changeAddrs = wallet.getAddressesFromXPub(w.xpub, 1, 0, cIndex + 10);
-      const allAddrs = [...receiveAddrs, ...changeAddrs];
+      const resolved = await resolveHdWalletAddresses(w);
 
-      const promises = allAddrs.map(async (a) => {
+      let utxoFailures = 0;
+      const promises = resolved.allAddresses.map(async (a) => {
         try {
           const u = await network.getUtxos(a.address);
           if (u && u.length > 0) {
-            const privKeyHex = wallet.getPrivateKeyHexForPath(secret, 0, a.change, a.index);
+            const privKeyHex = w.type === 'hex_hd'
+              ? wallet.getPrivateKeyHexForHexHdPath(secret, 0, a.change, a.index)
+              : wallet.getPrivateKeyHexForPath(secret, 0, a.change, a.index);
             u.forEach(x => inputs.push({ ...x, address: a.address, privKeyHex }));
           }
-        } catch(e) {}
+        } catch(e) { utxoFailures++; }
       });
       await Promise.all(promises);
 
-      if (inputs.length === 0) throw new Error('No hay fondos suficientes (0 UTXOs).');
-      
-      const newChangeNode = wallet.getAddressesFromXPub(w.xpub, 1, cIndex, 1)[0];
+      // Chequeo critico: si fallaron demasiados getUtxos, podriamos estar
+      // firmando una tx con inputs incompletos (dejando UTXOs "atrapados"
+      // en direcciones que no consultamos con exito) o incluso el UTXO
+      // grande podria estar ausente. Abortar en vez de mandar una tx menor
+      // a lo que el usuario cree que esta enviando.
+      if (tooManyNetworkFailures(utxoFailures, resolved.allAddresses.length)) {
+        throw new Error('Error de red: fallaron demasiadas consultas de UTXOs. Reintenta antes de enviar para no dejar fondos afuera de la transaccion.');
+      }
+
+      if (inputs.length === 0) {
+        throw new Error('No hay fondos suficientes (0 UTXOs).');
+      }
+
+      // Nueva direccion de change: la primera libre segun lo descubierto.
+      const newChangeNode = wallet.getAddressesFromXPub(w.xpub, 1, resolved.changeIndex, 1)[0];
       changeAddress = newChangeNode.address;
+      nextChangeIndexToPersist = resolved.changeIndex + 1;
     }
 
     const amountSats = Math.floor(parseFloat(amountBch) * 1e8);
@@ -256,9 +485,15 @@ function registerIpc() {
     });
 
     const txid = await network.broadcastTransaction(rawTxHex);
-    
-    if (w.type === 'mnemonic') {
-      storage.updateWallet(w.id, { changeIndex: (w.changeIndex || 0) + 1 });
+
+    if (isHdWallet(w) && nextChangeIndexToPersist !== null) {
+      try {
+        storage.updateWallet(w.id, { changeIndex: nextChangeIndexToPersist });
+      } catch (e) {
+        // La tx ya se broadcasteo con exito; un fallo persistiendo el indice
+        // no puede propagarse como error porque el usuario perderia el txid.
+        console.error('Tx enviada OK pero fallo persistir changeIndex:', e);
+      }
     }
 
     return txid;
@@ -268,7 +503,7 @@ function registerIpc() {
   ipcMain.handle('wallet:incrementReceiveIndex', async (_e, id) => {
     const wallets = storage.listWalletsPublic();
     const w = wallets.find(x => x.id === id);
-    if (!w || w.type !== 'mnemonic') throw new Error('Wallet HD no encontrada');
+    if (!isHdWallet(w)) throw new Error('Wallet HD no encontrada');
     
     storage.updateWallet(w.id, { receiveIndex: (w.receiveIndex || 0) + 1 });
     return true;
@@ -281,14 +516,11 @@ function registerIpc() {
     if (!w) throw new Error('Wallet no encontrada');
 
     let allAddrs = [];
-    if (w.type === 'hex') {
+    if (!isHdWallet(w)) {
       allAddrs.push(w.address);
     } else {
-      const rIndex = w.receiveIndex || 0;
-      const cIndex = w.changeIndex || 0;
-      const receiveAddrs = wallet.getAddressesFromXPub(w.xpub, 0, 0, rIndex + 5);
-      const changeAddrs = wallet.getAddressesFromXPub(w.xpub, 1, 0, cIndex + 5);
-      allAddrs = [...receiveAddrs.map(a => a.address), ...changeAddrs.map(a => a.address)];
+      const resolved = await resolveHdWalletAddresses(w);
+      allAddrs = resolved.allAddresses.map(a => a.address);
     }
 
     const myAddrs = new Set(allAddrs);

@@ -6,24 +6,31 @@ Ghost Wallet is an SPV (Simplified Payment Verification) desktop wallet for Bitc
 
 Unlike traditional wallets that leak the user's IP address to public servers when checking balances, Ghost Wallet natively integrates the **Tor** network engine — invisibly and automatically.
 
-## Features
+---
+
+## Key Features
 
 - **Tor-Only Networking (Fail-Closed):** All network traffic is routed through Tor via a local SOCKS5h proxy. If Tor is unavailable, the wallet simply does not connect — no clearnet fallback, ever.
 - **Circuit Rotation:** Force a new Tor circuit (`SIGNAL NEWNYM`) to change your network identity instantly, without restarting the app.
-- **Local Cryptography:** Private keys (BIP39 seed phrases or raw 64-char hex secrets) never leave your computer. Transaction signing is performed 100% offline.
-- **Fiat Price Display:** Real-time BCH price fetched entirely through Tor (Kraken, Bitfinex, CoinGecko, Coinbase, CoinCap) with FX conversion for non-USD currencies.
-- **Multi-Language:** English and Spanish (EN/ES) with a language selector.
-- **Cross-Platform:** Runs on Windows, Linux, and macOS. The Tor expert bundle is downloaded automatically for the detected platform.
-- **SPV via Fulcrum Nodes:** Uses `@electrum-cash/network` to interact with public SPV servers in a decentralized way.
-- **AES-256-GCM Encryption:** Saved wallets are stored locally, encrypted with your password.
+- **Hierarchical Deterministic (HD) & Legacy Keys:** Supports BIP39 12 to 24-word seed phrases, 64-character (256-bit) HD seeds (deriving full BIP32/BIP44 `m/44'/145'/0'/0/i` trees), and single-address Legacy hex keys.
+- **Interactive QR Codes & Privacy Overlay:** Each wallet card features a QR code with an automatic blur overlay to prevent shoulder surfing, clickable to reveal.
+- **Max Send & Fee Estimation:** Automatic Network Fee calculation and maximum spendable balance estimation before sending transactions.
+- **Satoshis & BCH Unit Formatting:** Toggle between BCH and satoshi displays with locale-aware thousands separators.
+- **Local Cryptography:** Private keys never leave your computer. All transaction signing is performed 100% offline.
+- **Real-Time Fiat Price Display:** BCH prices are fetched through Tor (Kraken, Bitfinex, CoinGecko, Coinbase, CoinCap) with FX conversion for non-USD currencies.
+- **Multi-Language Support:** Native English and Spanish (EN/ES) internationalization system with live language switcher.
+- **AES-256-GCM Storage Encryption:** Saved wallets are encrypted locally on disk using password-derived keys.
+- **Cross-Platform:** Native support for Windows, Linux, and macOS. Automatically downloads and verifies the correct Tor expert bundle for the host platform.
 
-## Installation
+---
+
+## Installation & Usage
 
 ### Prerequisites
 - [Node.js](https://nodejs.org/) (v18 or higher recommended)
 - npm (included with Node.js)
 
-### Steps
+### Running Locally
 
 1. Clone this repository:
    ```bash
@@ -36,29 +43,57 @@ Unlike traditional wallets that leak the user's IP address to public servers whe
    npm install
    ```
 
-3. Run the wallet:
+3. Start the wallet:
    ```bash
    npm start
    ```
 
-On first launch, the app will download the Tor expert bundle (~15 MB) for your platform, verify its SHA256 hash against the hardcoded official hash, and start the Tor daemon automatically.
+On first launch, the application automatically downloads the Tor expert bundle (~15 MB) for your operating system, verifies its SHA256 hash against the hardcoded official hash, and launches the Tor background daemon.
+
+---
+
+## Building Executables
+
+Ghost Wallet uses `electron-builder` to produce standalone desktop installers and binaries.
+
+```bash
+# Build for Windows (NSIS Installer)
+npm run build:win
+
+# Build for Linux (AppImage)
+npm run build:linux
+
+# Build for macOS (DMG)
+npm run build:mac
+
+# Build for current OS
+npm run build
+```
+
+Packaged installers and executables are generated in the `dist/` directory.
+
+---
 
 ## Security Architecture
 
-- **Fail-Closed Design:** A monkey-patched `ws` module throws on any non-Tor connection attempt — clearnet is mathematically blocked.
-- **CookieAuthentication:** The Tor ControlPort requires 32-byte cookie authentication, preventing malicious local processes from hijacking the circuit.
-- **SOCKS5h (Remote DNS):** DNS resolution happens at the Tor exit node, preventing DNS leaks.
-- **Strict Content-Security-Policy:** The UI blocks all external resources and cross-origin scripts.
-- **Navigation Blocking:** Electron's main process prevents accidental external link opening.
-- **SHA256 Verification:** The Tor binary is verified against a hardcoded hash before extraction — a hash mismatch aborts the process (possible MITM protection).
+- **Fail-Closed Network Guard:** A monkey-patched `ws` WebSocket module blocks any non-Tor connection attempts — clearnet traffic is physically prevented.
+- **Cookie Authentication:** The Tor ControlPort uses 32-byte cookie authentication to prevent unauthorized local processes from hijacking the circuit.
+- **SOCKS5h Remote DNS:** Domain resolution is delegated strictly to the Tor exit node, preventing local DNS leaks.
+- **Strict Content-Security-Policy:** The HTML rendering layer enforces CSP rules that prohibit remote script execution and external network fetches outside the main IPC process.
+- **Navigation Guard:** Electron's main process intercepts and blocks unauthorized external URL navigation.
+- **SHA256 Binary Integrity Verification:** The downloaded Tor executable is SHA256-hashed before extraction. Any hash mismatch immediately aborts execution to prevent MITM tampering.
+
+---
 
 ## Contributing
 
-Security audits and pull requests are welcome. As software that handles cryptocurrency, community code review is the most important pillar.
+Security audits and pull requests are welcome. As software that manages cryptocurrency keys, transparent community code review is essential.
 
-## Support Development
+## Author & Support
 
-Help keep this project going: [fundme.cash/campaign/146](https://fundme.cash/campaign/146)
+Created by **MadSatCash** — [munia.cash/profile/madsatcash](https://munia.cash/profile/madsatcash)
+
+Support ongoing development: [fundme.cash/campaign/146](https://fundme.cash/campaign/146)
 
 ---
-*Disclaimer: This software is provided "as is". Use at your own risk.*
+*Disclaimer: This software is provided "as is", without warranty of any kind. Use at your own risk.*

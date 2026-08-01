@@ -72,6 +72,68 @@ async function main() {
   const c = await w.candidatesFromHexSecret(s1);
   ok('del secreto sale una direccion valida', /^bitcoincash:q/.test(c[0].address));
 
+  console.log('\n== Semilla hexadecimal HD (BCH, m/44h/145h/0h/0/i) ==');
+  const hexHdSeed = '466d0b53493912bc2b319bcfb6803a78d417a06d95c7050f6a2fbfc88afb471c';
+  const hexHdAddresses = w.addressesFromHexHd(hexHdSeed, { count: 3 });
+  eq('HD hex deriva 3 direcciones', hexHdAddresses.length, 3);
+  eq('HD hex usa la ruta BCH esperada', hexHdAddresses[0].path, "m/44'/145'/0'/0/0");
+  eq('HD hex direccion 0 determinista', hexHdAddresses[0].address, 'bitcoincash:qz08xensr7ufqa2twdulaylxw7antazr2un4f5qxup');
+  eq('HD hex direccion 1 determinista', hexHdAddresses[1].address, 'bitcoincash:qr7e2st2lygev2qum948y0a39evng4vdy5fm77zpq9');
+  eq('HD hex direccion 2 determinista', hexHdAddresses[2].address, 'bitcoincash:qr0gzatl2cmxmkpfav6w0zm5xys4nnqcxg3gv8pa6w');
+
+  const hexHdXpub = w.getXPubFromHexHd(hexHdSeed);
+  eq(
+    'HD hex xpub determinista',
+    hexHdXpub,
+    'xpub6BrzmJsercYhyNUQt2pjJPon3Q5jAWMQtPgFKAaTL5SDuaptVUJZ1MmuvkLoizj5PMWSR4BRx875yUP52KoM4i3koceCtii5qFsFuyNcg7t'
+  );
+  const fromXpub = w.getAddressesFromXPub(hexHdXpub, 0, 0, 3);
+  eq('xpub reproduce la direccion 0', fromXpub[0].address, hexHdAddresses[0].address);
+  eq('xpub reproduce la direccion 2', fromXpub[2].address, hexHdAddresses[2].address);
+
+  const child0Secret = w.getPrivateKeyHexForHexHdPath(hexHdSeed, 0, 0, 0);
+  const child0Candidates = await w.candidatesFromHexSecret(child0Secret);
+  eq(
+    'privada hija firma para la direccion 0',
+    child0Candidates.find((candidate) => candidate.recipe === 'compressed').address,
+    hexHdAddresses[0].address
+  );
+  const legacyFromSameSecret = await w.candidatesFromHexSecret(hexHdSeed);
+  eq(
+    'la direccion Legacy existente permanece sin cambios',
+    legacyFromSameSecret.find((candidate) => candidate.recipe === 'compressed').address,
+    'bitcoincash:qrv7g523vn6jejwrndqjzdm2n0y5cg9cqsecznhr9k'
+  );
+  ok('la direccion 0 HD no reemplaza a la Legacy', legacyFromSameSecret[0].address !== hexHdAddresses[0].address);
+
+  const change0 = w.addressesFromHexHd(hexHdSeed, { change: 1, count: 1 })[0];
+  const rawHdTx = w.buildAndSignTx({
+    inputs: [
+      {
+        tx_hash: '11'.repeat(32),
+        tx_pos: 0,
+        address: hexHdAddresses[0].address,
+        value: 10000,
+        privKeyHex: w.getPrivateKeyHexForHexHdPath(hexHdSeed, 0, 0, 0)
+      },
+      {
+        tx_hash: '22'.repeat(32),
+        tx_pos: 1,
+        address: hexHdAddresses[1].address,
+        value: 10000,
+        privKeyHex: w.getPrivateKeyHexForHexHdPath(hexHdSeed, 0, 0, 1)
+      }
+    ],
+    toAddress: hexHdAddresses[2].address,
+    changeAddress: change0.address,
+    amountSats: 15000
+  });
+  const bitcore = require('bitcore-lib-cash');
+  const parsedHdTx = new bitcore.Transaction(rawHdTx);
+  eq('transaccion HD incluye sus 2 inputs', parsedHdTx.inputs.length, 2);
+  ok('cada input HD lleva su firma', parsedHdTx.inputs.every((input) => input.script.toBuffer().length > 0));
+  eq('transaccion HD crea salida de cambio', parsedHdTx.outputs.length, 2);
+
   console.log('\n== Formateo de saldos (satoshis -> BCH) ==');
   const net = require('../src/core/network');
   eq('1 BCH', net.formatBch(100000000), '1 BCH');
@@ -110,6 +172,8 @@ async function main() {
   eq('nombre coincide', savedList[0].name, 'Test Wallet');
   eq('direccion coincide', savedList[0].address, testAddr);
   eq('tipo coincide', savedList[0].type, 'hex');
+  eq('Legacy no recibe xpub', savedList[0].xpub, null);
+  eq('Legacy no recibe indice de recepcion', savedList[0].receiveIndex, undefined);
 
   // 3. Desencriptar
   const decrypted = storage.getDecryptedSecret(savedList[0].id, testPass);
@@ -123,7 +187,23 @@ async function main() {
   console.log('  OK  error lanzado al descifrar con clave incorrecta');
   passed++;
 
-  // 5. Borrar wallet
+  // 5. Guardar la nueva variante HD con semilla hexadecimal
+  const savedWithHd = storage.saveWallet({
+    name: 'Test HD Hex',
+    address: hexHdAddresses[0].address,
+    type: 'hex_hd',
+    secret: hexHdSeed,
+    password: testPass
+  });
+  eq('lista tiene tambien la HD hexadecimal', savedWithHd.length, 2);
+  const savedHd = savedWithHd.find((wallet) => wallet.type === 'hex_hd');
+  eq('HD hexadecimal guarda su xpub', savedHd.xpub, hexHdXpub);
+  eq('HD hexadecimal inicia receiveIndex en 0', savedHd.receiveIndex, 0);
+  eq('HD hexadecimal inicia changeIndex en 0', savedHd.changeIndex, 0);
+  eq('semilla HD descifrada coincide', storage.getDecryptedSecret(savedHd.id, testPass), hexHdSeed);
+
+  // 6. Borrar wallets
+  storage.deleteWallet(savedHd.id);
   const afterDelete = storage.deleteWallet(savedList[0].id);
   eq('lista vuelve a estar vacia', afterDelete.length, 0);
 

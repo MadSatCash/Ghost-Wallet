@@ -94,9 +94,11 @@ function saveWallet({ name, address, type, secret, password, xpub = null }) {
   const wallets = readRawWallets();
 
   let finalXpub = xpub;
-  if (type === 'mnemonic' && !finalXpub) {
+  if ((type === 'mnemonic' || type === 'hex_hd') && !finalXpub) {
     const wallet = require('./wallet');
-    finalXpub = wallet.getXPubFromMnemonic(secret);
+    finalXpub = type === 'mnemonic'
+      ? wallet.getXPubFromMnemonic(secret)
+      : wallet.getXPubFromHexHd(secret);
   }
 
   // Evitar duplicados por dirección (o xpub)
@@ -111,8 +113,8 @@ function saveWallet({ name, address, type, secret, password, xpub = null }) {
     address,
     type,
     xpub: finalXpub,
-    receiveIndex: type === 'mnemonic' ? 0 : undefined,
-    changeIndex: type === 'mnemonic' ? 0 : undefined,
+    receiveIndex: (type === 'mnemonic' || type === 'hex_hd') ? 0 : undefined,
+    changeIndex: (type === 'mnemonic' || type === 'hex_hd') ? 0 : undefined,
     salt: encrypted.salt,
     iv: encrypted.iv,
     tag: encrypted.tag,
