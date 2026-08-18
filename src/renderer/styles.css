@@ -634,3 +634,133 @@ code {
   color: #fff;
   text-decoration: underline;
 }
+
+/* ---------- Modal generico (confirmaciones y avisos) ---------- */
+/* Reemplaza alert()/confirm() nativos del navegador. */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.66);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 1000;
+}
+
+/* .hidden se declara antes en esta hoja y tiene la misma especificidad, asi
+   que sin esto el display:flex de arriba lo pisa y el modal queda visible. */
+.modal-backdrop.hidden { display: none; }
+
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 24px;
+  width: 100%;
+  max-width: 460px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+}
+
+.modal-title {
+  margin: 0 0 14px;
+  font-size: 19px;
+  color: var(--text);
+}
+
+.modal-body {
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.btn.btn-ghost {
+  background: transparent;
+  color: var(--muted);
+}
+.btn.btn-ghost:hover { color: var(--text); }
+
+/* Resumen de la transaccion dentro del modal de confirmacion */
+.tx-review {
+  display: grid;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.tx-review-row {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.tx-review-label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tx-review-value {
+  color: var(--text);
+  font-family: monospace;
+  font-size: 14px;
+  word-break: break-all;
+}
+
+.tx-review-value.amount {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--bch);
+}
+
+.tx-review-note {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--warn-text);
+}
+
+/* El envio une varias direcciones propias: cuesta privacidad, no plata.
+   Se destaca sin usar el rojo del error, que aca significa otra cosa. */
+.tx-review-privacy {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 176, 32, 0.35);
+  border-radius: 8px;
+  background: rgba(255, 176, 32, 0.08);
+}
+
+/* Aviso de dato que no paso el cruce entre operadores Electrum. */
+.verify-warning {
+  background: rgba(255, 107, 107, 0.08);
+  border: 1px solid rgba(255, 107, 107, 0.35);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--warn-text);
+}
+.verify-warning-detail { margin-top: 4px; font-size: 12px; color: var(--muted); line-height: 1.4; }
+
+/* Estado de la cadena de cabeceras verificada por proof-of-work. */
+.chain-note {
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 11px;
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+.chain-note-ok { border-color: rgba(10, 193, 142, 0.3); color: var(--bch); }
+.chain-note-warn { border-color: rgba(255, 107, 107, 0.3); color: var(--warn-text); }

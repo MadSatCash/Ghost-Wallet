@@ -6,6 +6,10 @@
 
 const assert = require('node:assert');
 const w = require('../src/core/wallet');
+const consensus = require('../src/core/consensus');
+const chain = require('../src/core/chain');
+const spv = require('../src/core/spv');
+const coinselect = require('../src/core/coinselect');
 
 let passed = 0;
 function ok(name, cond) {
@@ -129,10 +133,56 @@ async function main() {
     amountSats: 15000
   });
   const bitcore = require('bitcore-lib-cash');
-  const parsedHdTx = new bitcore.Transaction(rawHdTx);
+  const parsedHdTx = new bitcore.Transaction(rawHdTx.hex);
   eq('transaccion HD incluye sus 2 inputs', parsedHdTx.inputs.length, 2);
   ok('cada input HD lleva su firma', parsedHdTx.inputs.every((input) => input.script.toBuffer().length > 0));
   eq('transaccion HD crea salida de cambio', parsedHdTx.outputs.length, 2);
+  ok('devuelve la comision calculada', Number.isInteger(rawHdTx.feeSats) && rawHdTx.feeSats > 0);
+  ok('devuelve el vuelto calculado', Number.isInteger(rawHdTx.changeSats));
+
+  console.log('\n== Validacion de destino y monto ==');
+  const tira = (nombre, fn, re) => {
+    try { fn(); ok(nombre, false); }
+    catch (e) { ok(nombre + ' -> ' + e.message, re.test(e.message)); }
+  };
+  const enviar = (over) => w.buildAndSignTx(Object.assign({
+    inputs: [{
+      tx_hash: '11'.repeat(32), tx_pos: 0,
+      address: hexHdAddresses[0].address, value: 100000,
+      privKeyHex: w.getPrivateKeyHexForHexHdPath(hexHdSeed, 0, 0, 0)
+    }],
+    toAddress: hexHdAddresses[2].address,
+    changeAddress: change0.address,
+    amountSats: 50000
+  }, over));
+
+  tira('rechaza destino de testnet', () => enviar({ toAddress: 'mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn' }), /mainnet|no es valida/);
+  tira('rechaza destino basura', () => enviar({ toAddress: 'no-es-una-direccion' }), /no es valida|vacia/);
+  tira('rechaza monto NaN', () => enviar({ amountSats: NaN }), /no es un numero/);
+  tira('rechaza monto por debajo de dust', () => enviar({ amountSats: 100 }), /dust/);
+  tira('rechaza sin UTXOs', () => enviar({ inputs: [] }), /UTXOs/);
+
+  console.log('\n== Conversion BCH -> satoshis (sin error de flotante) ==');
+  eq('0.29 BCH', w.bchToSats('0.29'), 29000000);
+  eq('0.07 BCH', w.bchToSats('0.07'), 7000000);
+  eq('1.1 BCH', w.bchToSats('1.1'), 110000000);
+  eq('1 satoshi', w.bchToSats('0.00000001'), 1);
+  tira('rechaza texto', () => w.bchToSats('abc'), /no es un numero/);
+  tira('rechaza negativo', () => w.bchToSats('-1'), /no es un numero/);
+  tira('rechaza 9 decimales', () => w.bchToSats('0.123456789'), /8 decimales/);
+
+  console.log('\n== Consistencia entre libauth y bitcore ==');
+  // Las direcciones que se le MUESTRAN al usuario salen de libauth; las que se
+  // GASTAN salen de bitcore via xpub. Si divergen, se reciben fondos en una
+  // direccion y se firma con la clave de otra.
+  const MNEMO = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+  const porLibauth = await w.addressesFromMnemonic(MNEMO, { count: 5 });
+  const porBitcore = w.getAddressesFromXPub(w.getXPubFromMnemonic(MNEMO, 0), 0, 0, 5);
+  ok('las 5 primeras direcciones coinciden entre libauth y bitcore',
+    porLibauth.every((a, i) => a.address === porBitcore[i].address));
+  const privDeFirma = w.getPrivateKeyHexForPath(MNEMO, 0, 0, 0);
+  const addrDeLaPriv = await w.addressFromPrivateKey(Buffer.from(privDeFirma, 'hex'), { compressed: true });
+  eq('la clave de firma corresponde a la direccion mostrada', addrDeLaPriv, porLibauth[0].address);
 
   console.log('\n== Formateo de saldos (satoshis -> BCH) ==');
   const net = require('../src/core/network');
@@ -211,9 +261,475 @@ async function main() {
   if (fs.existsSync(storage.filePath)) {
     fs.unlinkSync(storage.filePath);
   }
+  // storage escribe un .bak al guardar: si no se borra, el rmdir de abajo falla
+  // en silencio y queda test_data/ con wallets de prueba adentro.
+  if (fs.existsSync(storage.filePath + '.bak')) {
+    fs.unlinkSync(storage.filePath + '.bak');
+  }
   const testDataDir = path.dirname(storage.filePath);
   if (fs.existsSync(testDataDir)) {
     try { fs.rmdirSync(testDataDir); } catch {}
+  }
+
+
+  // ============================================================
+  // Consenso entre servidores Electrum
+  //
+  // Lo que se prueba aca no es la red: es el comparador. Entran respuestas de
+  // operadores distintos y tiene que decidir si el dato vale. Los casos que
+  // mas importan son los falsos positivos — diferencias legitimas entre
+  // servidores que NO tienen que disparar alarma.
+  // ============================================================
+  console.log('\n== Consenso entre operadores ==');
+
+  const bal = (operator, confirmed, unconfirmed = 0, height = 964552) =>
+    ({ operator, height, value: { confirmed, unconfirmed } });
+
+  {
+    const v = consensus.resolveBalance([bal('a', 5000), bal('b', 5000), bal('c', 5000)]);
+    ok('tres operadores que coinciden dan dato verificado', v.verified === true);
+    eq('el saldo de consenso es el que dijeron todos', v.value.confirmed, 5000);
+    eq('nadie discrepa', v.dissentBy.length, 0);
+  }
+
+  {
+    const v = consensus.resolveBalance([bal('a', 5000), bal('b', 5000), bal('c', 9999)]);
+    ok('un operador mintiendo invalida la verificacion', v.verified === false);
+    eq('motivo es discrepancia', v.reason, 'discrepancia');
+    eq('gana la mayoria honesta', v.value.confirmed, 5000);
+    eq('se identifica al que discrepa', v.dissentBy[0].operator, 'c');
+  }
+
+  {
+    const v = consensus.resolveBalance([bal('a', 5000)]);
+    ok('un solo operador nunca alcanza para verificar', v.verified === false);
+    eq('motivo es pocos-operadores', v.reason, 'pocos-operadores');
+  }
+
+  {
+    // Mempool: dos servidores ven la misma tx confirmada pero distinta cantidad
+    // sin confirmar. Eso es propagacion, no fraude: no debe romper el consenso.
+    const v = consensus.resolveBalance([bal('a', 5000, 700), bal('b', 5000, 0)]);
+    ok('divergencia de mempool no invalida el saldo confirmado', v.verified === true);
+    eq('el no confirmado se muestra conservador (el menor)', v.value.unconfirmed, 0);
+  }
+
+  {
+    // Desfase de altura: `b` ya proceso un bloque que `a` todavia no tiene, y
+    // por eso ve un UTXO de mas. Recortando a la altura comun, coinciden.
+    const utxoViejo = { tx_hash: 'aa', tx_pos: 0, height: 964000, value: 1000 };
+    const utxoNuevo = { tx_hash: 'bb', tx_pos: 0, height: 964553, value: 2000 };
+    const v = consensus.resolveUtxos([
+      { operator: 'a', height: 964552, value: [utxoViejo] },
+      { operator: 'b', height: 964553, value: [utxoViejo, utxoNuevo] },
+    ]);
+    ok('un servidor un bloque adelantado no cuenta como discrepancia', v.verified === true);
+    eq('la altura de corte es la mas baja', v.cutoffHeight, 964552);
+    eq('solo entra el UTXO que ambos ven', v.value.length, 1);
+    eq('y es el viejo', v.value[0].tx_hash, 'aa');
+  }
+
+  {
+    // Mismo UTXO pero con distinto valor: eso ya no se explica por desfase.
+    const v = consensus.resolveUtxos([
+      { operator: 'a', height: 964552, value: [{ tx_hash: 'aa', tx_pos: 0, height: 964000, value: 1000 }] },
+      { operator: 'b', height: 964552, value: [{ tx_hash: 'aa', tx_pos: 0, height: 964000, value: 5000 }] },
+    ]);
+    ok('un UTXO con monto alterado rompe el consenso', v.verified === false);
+  }
+
+  {
+    // Un UTXO fantasma que solo ve un servidor, por debajo de la altura de corte.
+    const real = { tx_hash: 'aa', tx_pos: 0, height: 964000, value: 1000 };
+    const fantasma = { tx_hash: 'ff', tx_pos: 0, height: 964100, value: 99999 };
+    const v = consensus.resolveUtxos([
+      { operator: 'a', height: 964552, value: [real] },
+      { operator: 'b', height: 964552, value: [real] },
+      { operator: 'c', height: 964552, value: [real, fantasma] },
+    ]);
+    ok('un UTXO inventado por un solo operador no pasa', v.verified === false);
+    ok('el UTXO fantasma queda afuera del resultado',
+       v.value.every(u => u.tx_hash !== 'ff'));
+  }
+
+  {
+    // El orden en que cada servidor devuelve los UTXOs no debe importar.
+    const u1 = { tx_hash: 'aa', tx_pos: 0, height: 964000, value: 1000 };
+    const u2 = { tx_hash: 'bb', tx_pos: 1, height: 964001, value: 2000 };
+    const v = consensus.resolveUtxos([
+      { operator: 'a', height: 964552, value: [u1, u2] },
+      { operator: 'b', height: 964552, value: [u2, u1] },
+    ]);
+    ok('el orden de los UTXOs no afecta la comparacion', v.verified === true);
+  }
+
+  {
+    // Sin respuestas no se inventa un veredicto optimista.
+    const v = consensus.resolveBalance([]);
+    ok('cero respuestas nunca da verificado', v.verified === false);
+    eq('motivo es sin-respuestas', v.reason, 'sin-respuestas');
+    eq('y no hay valor', v.value, null);
+  }
+
+  {
+    // El historial confirmado se compara; lo pendiente se conserva aparte.
+    const v = consensus.resolveHistory([
+      { operator: 'a', height: 964552, value: [{ tx_hash: 'aa', height: 964000 }, { tx_hash: 'pp', height: 0 }] },
+      { operator: 'b', height: 964552, value: [{ tx_hash: 'aa', height: 964000 }] },
+    ]);
+    ok('el historial coincide ignorando el mempool', v.verified === true);
+    eq('devuelve la confirmada y la pendiente', v.value.length, 2);
+  }
+
+  {
+    // Dos hosts del mismo dueño no son dos testigos. El pool ya conecta uno por
+    // operador; este test fija el contrato de que se cuenta por `operator`,
+    // para que una mayoria falsa no pase si eso se rompiera.
+    const t = consensus.tally(
+      [bal('imaginary.cash', 9999), bal('imaginary.cash', 9999), bal('loping.net', 5000)],
+      r => consensus.balanceFingerprint(r.value)
+    );
+    eq('el operador repetido aporta dos entradas al tally', t.agreedBy.length, 2);
+    ok('pero sigue siendo un solo dueño distinto',
+       new Set(t.agreedBy).size === 1);
+  }
+
+
+
+  // ============================================================
+  // Cadena de cabeceras: proof-of-work y ASERT
+  //
+  // Los vectores son cabeceras REALES de BCH alrededor del ancla ASERT
+  // (bloques 661646 a 661651). No son inventadas: si la implementacion de
+  // ASERT se desvia aunque sea en un bloque, estos numeros no cierran.
+  // ============================================================
+  console.log('\n== Cadena: dificultad y proof-of-work ==');
+
+  // Cabeceras consecutivas desde 661646 (el padre del ancla ASERT).
+  const HEADERS_REALES = [
+    '00000020ac1d4c0fdf21cfcba41d0bb00802ed3020befbedb8bbd700000000000000000008979c37cc3ff63198dc807c3b710f9df37fdc843b0db9de41bc78dbe5279f14a430b15f3ec00418d1623dd0',
+    '000000202df7a2e0562ebbbd8dc95ca6669c4f1ba888484c2cc7e403000000000000000067418c23d8901e49555725fb2e37adfb9ed29a05833eb4774d53b63b44ba457e8937b15ffeda04183c2b1978',
+    '000000202fe6ee2db04b6575ad185521133598e3590d787a4bed8300000000000000000042faaa7bb98abdfb6f780417b1c0eb7873cd49e048feef273d5e270e1eb223855938b15fd0e0041888420330',
+    '0000c020cea8b5f909054a0befc47110914cb7b8248d81411c479e020000000000000000039ea56fe7dfc4d384002372286a5c024853f44598a7ab6263c601744a51921a913cb15fdcde04186567266f',
+    '00e0ff37c2797878686dcff9a6cb1a182f326d3dabe27195d52dcc040000000000000000cc93adc8a42a413b45697da36694ced25e00b6eeff1fd935cce243a13961ec47b03db15f45e10418a6d026a5',
+    '000000205c93bb7e4caee647ff349ca4660a221be4344990c48ec004000000000000000010d825cdcb21f024ed723f3b3cfe80a5b3fbe10958d28be57ed1a29d865883497a42b15fb2df04189e864f51',
+  ];
+  const ALTURA_BASE = 661646;
+  const cadenaReal = Buffer.from(HEADERS_REALES.join(''), 'hex');
+  const cabecera = i => cadenaReal.subarray(i * 80, (i + 1) * 80);
+
+  // --- Formato compacto de dificultad ---
+  {
+    const bits = chain.ASERT_ANCHOR.bits;
+    eq('bits -> target -> bits vuelve al original', chain.targetToBits(chain.bitsToTarget(bits)), bits);
+    ok('el target del ancla es positivo', chain.bitsToTarget(bits) > 0n);
+    ok('el target del ancla esta bajo el limite', chain.bitsToTarget(bits) < chain.POW_LIMIT);
+    // Dificultad 1 de Bitcoin: el target maximo permitido.
+    ok('bits 0x1d00ffff da exactamente el POW_LIMIT',
+      chain.bitsToTarget(0x1d00ffff) === chain.POW_LIMIT);
+  }
+
+  // --- El ancla del codigo coincide con la cadena real ---
+  {
+    eq('los bits del ancla son los del bloque 661647',
+      chain.headerBits(cabecera(1)), chain.ASERT_ANCHOR.bits);
+    eq('el parentTime del ancla es el timestamp de 661646',
+      chain.headerTime(cabecera(0)), chain.ASERT_ANCHOR.parentTime);
+  }
+
+  // --- ASERT contra los bloques reales posteriores al ancla ---
+  {
+    // La dificultad del bloque N sale del timestamp y la altura de su PADRE.
+    // Este es el detalle facil de equivocar: usar los del propio bloque da una
+    // curva corrida en uno, que valida mal sin hacer ningun ruido.
+    for (let i = 2; i < HEADERS_REALES.length; i++) {
+      const altura = ALTURA_BASE + i;
+      const esperado = chain.expectedBits(altura - 1, chain.headerTime(cabecera(i - 1)));
+      eq('ASERT predice la dificultad del bloque ' + altura, esperado, chain.headerBits(cabecera(i)));
+    }
+  }
+
+  // --- Verificacion de un tramo ---
+  {
+    const tramo = cadenaReal.subarray(80);
+    const v = chain.verifyHeaders(tramo, ALTURA_BASE + 1, cabecera(0));
+    ok('el tramo real de 5 cabeceras valida entero', v.ok === true);
+    eq('verifico las 5', v.checked, 5);
+  }
+
+  {
+    // Encadenamiento roto: se saltea una cabecera del medio.
+    const salteado = Buffer.concat([cabecera(1), cabecera(3)]);
+    const v = chain.verifyHeaders(salteado, ALTURA_BASE + 1, cabecera(0));
+    ok('un tramo con una cabecera faltante se rechaza', v.ok === false);
+    ok('el error menciona el enganche', /engancha/.test(v.error));
+  }
+
+  {
+    // Proof-of-work roto: cambiar el nonce cambia el hash del bloque.
+    const conNonceRoto = Buffer.from(cabecera(1));
+    conNonceRoto.writeUInt32LE(999999, 76);
+    const v = chain.verifyHeaders(conNonceRoto, ALTURA_BASE + 1, cabecera(0));
+    ok('una cabecera con el nonce alterado se rechaza', v.ok === false);
+    ok('el error menciona el proof-of-work', /proof-of-work/.test(v.error));
+  }
+
+  {
+    // Un buffer cuyo largo no es multiplo de 80 no es una cadena de cabeceras.
+    const cortado = cadenaReal.subarray(0, 100);
+    const v = chain.verifyHeaders(cortado, ALTURA_BASE, null);
+    ok('un buffer de largo invalido se rechaza', v.ok === false);
+  }
+
+  {
+    // Sin padre no se puede verificar encadenamiento ni ASERT, pero el
+    // proof-of-work se comprueba igual.
+    const v = chain.verifyHeaders(cabecera(1), ALTURA_BASE + 1, null);
+    ok('una cabecera suelta valida su PoW sin padre', v.ok === true);
+  }
+
+  console.log('\n== Cadena: merkle proofs (SPV) ==');
+
+  // Arbol merkle armado a mano con cuatro hojas:
+  //
+  //          root
+  //         /    \
+  //     H(AB)    H(CD)
+  //     /  \     /  \
+  //    A    B   C    D
+  //
+  // Para probar que A esta en el arbol alcanza con la rama [B, H(CD)].
+  {
+    const hoja = h => Buffer.from(h, 'hex').reverse();
+    const A = 'aa'.repeat(32), B = 'bb'.repeat(32), C = 'cc'.repeat(32), D = 'dd'.repeat(32);
+
+    const hAB = chain.sha256d(Buffer.concat([hoja(A), hoja(B)]));
+    const hCD = chain.sha256d(Buffer.concat([hoja(C), hoja(D)]));
+    const rootEsperado = Buffer.from(chain.sha256d(Buffer.concat([hAB, hCD]))).reverse().toString('hex');
+    const hCDdisplay = Buffer.from(hCD).reverse().toString('hex');
+
+    eq('la rama de la hoja A reconstruye el root',
+      spv.merkleRootFromProof(A, 0, [B, hCDdisplay]), rootEsperado);
+
+    // La hoja B esta en posicion 1: el hermano va del otro lado.
+    eq('la rama de la hoja B reconstruye el mismo root',
+      spv.merkleRootFromProof(B, 1, [A, hCDdisplay]), rootEsperado);
+
+    ok('una posicion equivocada da otro root',
+      spv.merkleRootFromProof(A, 1, [B, hCDdisplay]) !== rootEsperado);
+
+    ok('una rama adulterada da otro root',
+      spv.merkleRootFromProof(A, 0, ['ff'.repeat(32), hCDdisplay]) !== rootEsperado);
+  }
+
+  {
+    // Sin cabecera verificada para esa altura, no se afirma nada.
+    const v = spv.verifyTransaction('ab'.repeat(32), 1, { merkle: [], pos: 0 });
+    ok('sin cabecera verificada no se da por verificada', v.verified === false);
+    eq('y el motivo lo dice', v.reason, 'sin-cabecera');
+  }
+
+  {
+    // Una prueba mal formada se rechaza sin explotar.
+    const v = spv.verifyTransaction('ab'.repeat(32), 961549, null);
+    ok('una prueba ausente se rechaza', v.verified === false);
+    eq('motivo prueba-invalida', v.reason, 'prueba-invalida');
+  }
+
+  {
+    // Si el servidor dice una altura y el historial dice otra, no se sigue.
+    const v = spv.verifyTransaction('ab'.repeat(32), 961549, { merkle: [], pos: 0, block_height: 900000 });
+    ok('una altura discrepante se rechaza', v.verified === false);
+    eq('motivo altura-discrepante', v.reason, 'altura-discrepante');
+  }
+
+
+  console.log('\n== Seleccion de monedas: que direcciones se exponen al gastar ==');
+  {
+    // Un UTXO de mentira, con lo unico que la seleccion mira: direccion y monto.
+    let contador = 0;
+    const utxo = (address, value) => ({
+      address,
+      value,
+      tx_hash: String(++contador).padStart(64, '0'),
+      tx_pos: 0,
+    });
+
+    const direcciones = (seleccion) => new Set(seleccion.inputs.map(i => i.address));
+
+    {
+      // Tres direcciones, cualquiera alcanza sola: se usa UNA, y la mas chica
+      // que cubra, para no romper una moneda grande al pedo.
+      const utxos = [utxo('addrA', 100000), utxo('addrB', 200000), utxo('addrC', 50000)];
+      const sel = coinselect.selectCoins({ utxos, amountSats: 30000 });
+
+      eq('gasta de una sola direccion', sel.addressCount, 1);
+      eq('con una sola entrada', sel.inputCount, 1);
+      ok('no marca direcciones unidas', sel.merged === false);
+      eq('elige la mas chica que alcanza', sel.inputs[0].address, 'addrC');
+      eq('y no toca las otras dos', direcciones(sel).size, 1);
+    }
+
+    {
+      // Un grupo de 3 monedas chicas alcanza, y uno de 1 moneda grande tambien.
+      // Gana el de 1: menos entradas es menos comision y menos huella on-chain.
+      const utxos = [
+        utxo('addrD', 20000), utxo('addrD', 20000), utxo('addrD', 20000),
+        utxo('addrE', 70000),
+      ];
+      const sel = coinselect.selectCoins({ utxos, amountSats: 30000 });
+
+      eq('prefiere menos entradas antes que menor total', sel.inputs[0].address, 'addrE');
+      eq('y usa una sola entrada', sel.inputCount, 1);
+    }
+
+    {
+      // El grupo de una direccion se gasta entero: gastar la mitad no protege
+      // nada, porque al firmar ya revelaste que esa direccion es tuya.
+      const utxos = [utxo('addrF', 30000), utxo('addrF', 40000)];
+      const sel = coinselect.selectCoins({ utxos, amountSats: 25000 });
+
+      eq('usa las dos monedas de la direccion', sel.inputCount, 2);
+      eq('sigue siendo una sola direccion', sel.addressCount, 1);
+    }
+
+    {
+      // Ninguna alcanza sola: recien ahi se unen, de mayor a menor, para
+      // exponer la menor cantidad de direcciones posible.
+      const utxos = [utxo('addrA', 40000), utxo('addrB', 30000), utxo('addrC', 20000)];
+      const sel = coinselect.selectCoins({ utxos, amountSats: 70000 });
+
+      ok('avisa que unio direcciones', sel.merged === true);
+      eq('y dice cuantas', sel.addressCount, 3);
+      ok('el total alcanza para monto mas comision',
+        sel.totalIn >= 70000 + sel.feeSats);
+    }
+
+    {
+      // Dust attack: te mandan polvo a una direccion tuya para que vos mismo lo
+      // unas al resto. Una moneda que vale menos que su propia comision nunca
+      // entra sola en un envio.
+      const utxos = [utxo('addrA', 100000), utxo('addrDust', 100)];
+      const sel = coinselect.selectCoins({ utxos, amountSats: 30000 });
+
+      ok('el polvo no entra en la transaccion', !direcciones(sel).has('addrDust'));
+      eq('y queda reportado como descartado', sel.skipped.length, 1);
+
+      eq('149 sats no cubren su propia entrada', coinselect.isProfitable({ value: 149 }), false);
+      eq('150 sats si', coinselect.isProfitable({ value: 150 }), true);
+    }
+
+    {
+      // Los UTXOs llegan de consultas en paralelo: el orden puede cambiar entre
+      // la pantalla de confirmacion y el envio. La seleccion no puede cambiar
+      // con el, o el usuario firmaria algo distinto de lo que aprobo.
+      const utxos = [
+        utxo('addrA', 40000), utxo('addrB', 40000),
+        utxo('addrC', 25000), utxo('addrD', 25000),
+      ];
+      const primera = coinselect.selectCoins({ utxos, amountSats: 60000 });
+      const segunda = coinselect.selectCoins({ utxos: utxos.slice().reverse(), amountSats: 60000 });
+
+      eq('la misma seleccion sin importar el orden de llegada',
+        Array.from(direcciones(primera)).sort().join(','),
+        Array.from(direcciones(segunda)).sort().join(','));
+      eq('y la misma comision', primera.feeSats, segunda.feeSats);
+    }
+
+    {
+      // Cuando el cambio quedaria por debajo del dust no se puede devolver:
+      // se va en comision y la tx queda con una sola salida.
+      const seleccionados = [{ value: 20527 }];
+      const plan = coinselect.planFor(seleccionados, 20000);
+
+      ok('el plan es viable', plan.ok === true);
+      eq('sin salida de cambio', plan.changeSats, 0);
+      eq('el remanente se va en comision', plan.feeSats, 527);
+    }
+
+    {
+      const seleccionados = [{ value: 100000 }];
+      const plan = coinselect.planFor(seleccionados, 20000);
+      eq('con cambio, la comision es la de dos salidas', plan.feeSats, 10 + 149 + 68);
+      eq('y el cambio es el resto', plan.changeSats, 100000 - 20000 - (10 + 149 + 68));
+    }
+
+    {
+      // Saldo suficiente pero desparramado en mas monedas de las que entran.
+      // El error tiene que decir eso, no "no te alcanza".
+      const muchas = [];
+      for (let i = 0; i < 60; i++) muchas.push(utxo('addr' + i, 1000));
+
+      assert.throws(
+        () => coinselect.selectCoins({ utxos: muchas, amountSats: 55000 }),
+        /tope/i,
+        'FALLO: demasiadas monedas tiene que explicarse por el tope de entradas'
+      );
+      console.log('  OK  demasiadas monedas: el error explica el tope');
+      passed++;
+    }
+
+    {
+      const utxos = [utxo('addrA', 5000)];
+      assert.throws(
+        () => coinselect.selectCoins({ utxos, amountSats: 100000 }),
+        /No alcanza el saldo/,
+        'FALLO: saldo insuficiente tiene que decirse asi'
+      );
+      console.log('  OK  saldo insuficiente: el error lo dice');
+      passed++;
+    }
+
+    {
+      // Vaciar la wallet SI barre todo: es lo que el usuario pidio. Pero el
+      // polvo que resta valor sigue afuera, y se informa cuantas direcciones une.
+      const utxos = [utxo('addrA', 100000), utxo('addrB', 50000), utxo('addrDust', 100)];
+      const plan = coinselect.planMaxSend({ utxos });
+
+      eq('barre las dos direcciones con fondos', plan.addressCount, 2);
+      eq('sin arrastrar el polvo', plan.utxoCount, 2);
+      eq('comision de dos entradas y una salida', plan.feeSats, 10 + 2 * 149 + 34);
+      eq('el maximo es todo menos la comision', plan.maxSats, 150000 - (10 + 2 * 149 + 34));
+    }
+  }
+
+  {
+    // El puente entre las dos mitades: lo que la pantalla de confirmacion le
+    // muestra al usuario tiene que ser exactamente lo que se firma. Si la
+    // seleccion y la construccion calcularan distinto, el usuario aprobaria una
+    // comision y pagaria otra.
+    const utxosDeDosDirecciones = [
+      { tx_hash: 'aa'.repeat(32), tx_pos: 0, address: hexHdAddresses[0].address, value: 60000 },
+      { tx_hash: 'bb'.repeat(32), tx_pos: 0, address: hexHdAddresses[1].address, value: 90000 },
+    ];
+    const indicePorDireccion = { [hexHdAddresses[0].address]: 0, [hexHdAddresses[1].address]: 1 };
+
+    const plan = w.planSend({
+      utxos: utxosDeDosDirecciones,
+      toAddress: hexHdAddresses[2].address,
+      amountSats: 50000,
+    });
+    eq('el envio se cubre con una sola direccion', plan.addressCount, 1);
+
+    const firmada = w.buildAndSignTx({
+      inputs: plan.inputs.map(u => ({
+        ...u,
+        privKeyHex: w.getPrivateKeyHexForHexHdPath(hexHdSeed, 0, 0, indicePorDireccion[u.address]),
+      })),
+      toAddress: hexHdAddresses[2].address,
+      changeAddress: change0.address,
+      amountSats: 50000,
+    });
+
+    eq('la comision firmada es la que se mostro', firmada.feeSats, plan.feeSats);
+    eq('el vuelto firmado es el que se mostro', firmada.changeSats, plan.changeSats);
+    eq('se firman solo las entradas elegidas', firmada.inputCount, plan.inputCount);
+
+    const parsed = new bitcore.Transaction(firmada.hex);
+    const salidas = parsed.outputs.reduce((s, o) => s + o.satoshis, 0);
+    eq('entradas = salidas + comision', plan.totalIn, salidas + firmada.feeSats);
+    ok('la direccion no gastada sigue intacta',
+      !plan.inputs.some(u => u.address === hexHdAddresses[1].address));
   }
 
   console.log(`\nTODO OK (${passed} comprobaciones)\n`);

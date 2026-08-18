@@ -183,7 +183,11 @@ currencySelect.addEventListener('change', function() {
   setCurrency(currencySelect.value);
   updateAllFiatDisplays();
   renderPriceStatus();
-  if (getDisplayedPriceCode() !== getCurrency()) refreshPriceIfTorReady({ silent: false });
+  // Sin cotizacion cargada getDisplayedPriceCode() devuelve la moneda elegida,
+  // asi que comparar sola no alcanza: hay que pedir precio igual. Y va forzado
+  // porque el cache del main puede ser justo el payload al que le falta.
+  var faltaLaMoneda = !fmtPricePerBch() || isUsingFallbackPrice() || getDisplayedPriceCode() !== getCurrency();
+  if (faltaLaMoneda) refreshPriceIfTorReady({ silent: false, force: true });
 });
 
 var refreshPriceBtn = $('#btn-refresh-price');
@@ -205,6 +209,23 @@ applyTranslations();
 renderPriceStatus();
 refreshPriceIfTorReady({ silent: true });
 
+// La cotizacion cacheada vence a los 5 min y nada la renovaba: la barra se
+// quedaba en "no disponible" hasta que el usuario tocara refrescar. Va forzado
+// porque un fetch sin force devuelve el payload viejo, con su updatedAt viejo,
+// y vence igual.
+var PRICE_AUTO_REFRESH_MS = 4 * 60 * 1000;
+setInterval(function() {
+  if (torState !== 'ready') return;
+  refreshPriceIfTorReady({ silent: true, force: true });
+}, PRICE_AUTO_REFRESH_MS);
+
+// Con la ventana en segundo plano Electron frena los timers: al volver, si la
+// cotizacion vencio mientras tanto, se pide de nuevo.
+window.addEventListener('focus', function() {
+  if (torState !== 'ready' || fmtPricePerBch()) return;
+  refreshPriceIfTorReady({ silent: true, force: true });
+});
+
 // --- Navegacion entre pantallas ---
 function goTo(name) {
   $$('.screen').forEach(function(s) { s.classList.toggle('active', s.dataset.screen === name); });
@@ -218,6 +239,7 @@ function goTo(name) {
     $('#save-create-section').classList.add('hidden');
     $('#save-create-name').value = '';
     $('#save-create-password').value = '';
+    $('#save-create-password-confirm').value = '';
     $('#save-create-error').classList.add('hidden');
     currentMnemonic = '';
     currentSecret = '';
@@ -232,6 +254,7 @@ function goTo(name) {
     $('#save-import-section').classList.add('hidden');
     $('#save-import-name').value = '';
     $('#save-import-password').value = '';
+      $('#save-import-password-confirm').value = '';
     $('#save-import-error').classList.add('hidden');
   }
 }
@@ -243,6 +266,101 @@ function escapeHtml(s) {
     return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
   });
 }
+
+// Un txid legitimo son 64 caracteres hex. Lo que venga del servidor Electrum
+// que no cumpla eso no se muestra como enlace ni se concatena en HTML.
+function isTxid(s) {
+  return /^[0-9a-fA-F]{64}$/.test(String(s || ''));
+}
+
+// Enlace al explorador. Si el txid que mando el servidor no tiene forma de
+// txid, se muestra como texto plano y NO como enlace: asi un servidor hostil
+// no puede fabricar un href arbitrario que termine abriendose en el navegador.
+function txidLink(txid) {
+  if (!isTxid(txid)) {
+    return '<span style="word-break: break-all;">' + escapeHtml(String(txid || '')) + '</span>';
+  }
+  return '<a href="https://blockchair.com/bitcoin-cash/transaction/' + encodeURIComponent(txid) +
+    '" style="color: var(--muted); text-decoration: none;">' + escapeHtml(txid) + '</a>';
+}
+
+// =========================== MODAL ===========================
+// Reemplaza alert()/confirm() nativos: mismo estilo que el resto de la app.
+
+var _modalResolve = null;
+
+function closeModal(result) {
+  $('#modal-backdrop').classList.add('hidden');
+  var r = _modalResolve;
+  _modalResolve = null;
+  if (r) r(result);
+}
+
+// bodyHtml ya debe venir escapado por el llamador.
+function openModal(opts) {
+  return new Promise(function(resolve) {
+    _modalResolve = resolve;
+    $('#modal-title').textContent = opts.title || '';
+    $('#modal-body').innerHTML = opts.bodyHtml || escapeHtml(opts.body || '');
+
+    var okBtn = $('#modal-ok');
+    var cancelBtn = $('#modal-cancel');
+
+    okBtn.textContent = opts.confirmText || t('modal_accept');
+    okBtn.className = 'btn ' + (opts.danger ? 'primary' : 'primary');
+
+    if (opts.cancelText) {
+      cancelBtn.textContent = opts.cancelText;
+      cancelBtn.classList.remove('hidden');
+    } else {
+      cancelBtn.classList.add('hidden');
+    }
+
+    $('#modal-backdrop').classList.remove('hidden');
+    okBtn.focus();
+  });
+}
+
+// Valida la contrasena de una wallet nueva. Devuelve un mensaje de error, o
+// null si esta bien.
+//
+// La confirmacion importa tanto como la longitud: sin ella, un error de tipeo
+// al crear la wallet la deja inaccesible para siempre y no hay forma de saberlo
+// hasta que ya es tarde.
+var PASSWORD_MIN = 8;
+
+function validarPassword(password, confirmacion) {
+  if (!password) return t('password_required');
+  if (password.length < PASSWORD_MIN) return t('password_too_short');
+  if (password !== confirmacion) return t('password_mismatch');
+  return null;
+}
+
+function showAlert(message, title) {
+  return openModal({ title: title || t('modal_notice'), body: message });
+}
+
+function showConfirm(opts) {
+  return openModal({
+    title: opts.title,
+    bodyHtml: opts.bodyHtml,
+    body: opts.body,
+    confirmText: opts.confirmText,
+    cancelText: opts.cancelText || t('modal_cancel'),
+    danger: opts.danger,
+  });
+}
+
+$('#modal-ok').addEventListener('click', function() { closeModal(true); });
+$('#modal-cancel').addEventListener('click', function() { closeModal(false); });
+$('#modal-backdrop').addEventListener('click', function(e) {
+  if (e.target === this && !$('#modal-cancel').classList.contains('hidden')) closeModal(false);
+});
+document.addEventListener('keydown', function(e) {
+  if (_modalResolve === null) return;
+  if (e.key === 'Escape' && !$('#modal-cancel').classList.contains('hidden')) closeModal(false);
+  if (e.key === 'Enter') closeModal(true);
+});
 
 function addressBox(label, address, note) {
   var box = document.createElement('div');
@@ -407,6 +525,7 @@ $('#btn-saved').addEventListener('click', async function() {
 
   $('#save-create-name').value = '';
   $('#save-create-password').value = '';
+    $('#save-create-password-confirm').value = '';
   $('#save-create-error').classList.add('hidden');
   $('#save-create-section').classList.remove('hidden');
 });
@@ -506,6 +625,7 @@ $('#btn-import').addEventListener('click', async function() {
 
       $('#save-import-name').value = '';
       $('#save-import-password').value = '';
+      $('#save-import-password-confirm').value = '';
       $('#save-import-error').classList.add('hidden');
       $('#save-import-section').classList.remove('hidden');
       return;
@@ -534,6 +654,7 @@ $('#btn-import').addEventListener('click', async function() {
 
       $('#save-import-name').value = '';
       $('#save-import-password').value = '';
+      $('#save-import-password-confirm').value = '';
       $('#save-import-error').classList.add('hidden');
       $('#save-import-section').classList.remove('hidden');
       return;
@@ -562,6 +683,7 @@ $('#btn-import').addEventListener('click', async function() {
 
     $('#save-import-name').value = '';
     $('#save-import-password').value = '';
+      $('#save-import-password-confirm').value = '';
     $('#save-import-error').classList.add('hidden');
     $('#save-import-section').classList.remove('hidden');
   } catch (err) {
@@ -573,6 +695,75 @@ function serverNote(server) {
   var el = document.createElement('div');
   el.className = 'server-note';
   el.textContent = t('connected_to') + server;
+  return el;
+}
+
+// Distintivo SPV de una transaccion.
+//
+// Solo el verde afirma algo: que la transaccion esta en un bloque con
+// proof-of-work verificado. El resto de los estados NO son acusaciones — una tx
+// anterior al checkpoint o todavia en el mempool no es sospechosa, simplemente
+// cae fuera de lo que la wallet puede demostrar por si misma. Decirle "no
+// verificada" a secas al usuario seria mentirle por omision.
+function spvBadge(verification) {
+  if (!verification) return '';
+
+  var estilos = {
+    ok:       { bg: 'rgba(10,193,142,0.15)',  color: 'var(--bch)',        texto: t('spv_verified') },
+    pendiente:{ bg: 'rgba(255,255,255,0.06)', color: 'var(--muted)',      texto: t('spv_pending') },
+    fuera:    { bg: 'rgba(255,255,255,0.06)', color: 'var(--muted)',      texto: t('spv_out_of_range') },
+    alerta:   { bg: 'rgba(255,107,107,0.15)', color: 'var(--warn-text)',  texto: t('spv_failed') },
+  };
+
+  var clave;
+  if (verification.verified) clave = 'ok';
+  else if (verification.reason === 'sin-confirmar') clave = 'pendiente';
+  else if (verification.reason === 'fuera-de-rango' || verification.reason === 'sin-cabecera') clave = 'fuera';
+  else if (verification.reason === 'sin-prueba') clave = 'pendiente';
+  else clave = 'alerta';
+
+  var e = estilos[clave];
+  return '<span style="background: ' + e.bg + '; color: ' + e.color + '; font-size: 10px; ' +
+    'font-weight: 600; padding: 2px 7px; border-radius: 6px; margin-left: 8px; white-space: nowrap;" ' +
+    'title="' + escapeHtml(verification.detail || '') + '">' + e.texto + '</span>';
+}
+
+// Estado de la cadena de cabeceras, arriba del historial.
+//
+// Se muestra siempre, tambien cuando esta todo bien: el usuario tiene que poder
+// ver de un vistazo hasta donde llega lo que la wallet puede demostrar sola.
+function buildChainNote(estadoCadena) {
+  var el = document.createElement('div');
+  el.className = 'chain-note';
+
+  if (estadoCadena.fase === 'listo' && estadoCadena.tipHeight > 0) {
+    el.classList.add('chain-note-ok');
+    el.textContent = t('chain_ready', { height: estadoCadena.tipHeight });
+  } else if (estadoCadena.fase === 'error') {
+    el.classList.add('chain-note-warn');
+    el.textContent = t('chain_error', { error: estadoCadena.error || '' });
+  } else {
+    var pct = estadoCadena.total > 0
+      ? Math.min(99, Math.floor((estadoCadena.bajadas / estadoCadena.total) * 100))
+      : 0;
+    el.textContent = t('chain_syncing', { pct: pct });
+  }
+  return el;
+}
+
+// Aviso de que el dato mostrado no paso el cruce entre operadores.
+// Va con el detalle textual, no con un icono a secas: si la wallet dice
+// "cuidado" tiene que decir tambien que vio y quien discrepa.
+function buildVerificationWarning(verification) {
+  var el = document.createElement('div');
+  el.className = 'verify-warning';
+  var titulo = document.createElement('strong');
+  titulo.textContent = t('verify_unverified_title');
+  var detalle = document.createElement('div');
+  detalle.className = 'verify-warning-detail';
+  detalle.textContent = verification.detail || '';
+  el.appendChild(titulo);
+  el.appendChild(detalle);
   return el;
 }
 
@@ -635,6 +826,15 @@ async function loadSavedWallets() {
 
     item.addEventListener('click', function() { showWalletDetails(w.id); });
     list.appendChild(item);
+
+    // Sin Tor listo no se consulta nada: el fail-closed del proceso principal
+    // rechazaria igual, pero pedirlo aca llenaria la lista de "Error" cuando lo
+    // correcto es decir que todavia se esta estableciendo la red.
+    var balEl0 = document.getElementById('bal-' + w.id);
+    if (torState !== 'ready') {
+      if (balEl0) balEl0.textContent = t('price_establishing_network');
+      return;
+    }
 
     var balancePromise = isHdWalletType(w.type)
       ? window.api.getHdBalance(w.id)
@@ -724,6 +924,9 @@ async function showWalletDetails(id) {
     currentWalletBalanceSats = (b.confirmed || 0) + (b.unconfirmed || 0);
     balContainer.innerHTML = '';
     balContainer.appendChild(balanceHead(b.confirmed, b.unconfirmed));
+    if (b.verification && !b.verification.verified) {
+      balContainer.appendChild(buildVerificationWarning(b.verification));
+    }
   } catch (err) {
     currentWalletBalanceSats = 0;
     balContainer.innerHTML = '<div class="error">' + t('balance_network_error', { error: escapeHtml(err.message || String(err)) }) + '</div>';
@@ -743,11 +946,13 @@ $('#btn-generate-address').addEventListener('click', async function() {
 $('#btn-save-created').addEventListener('click', async function() {
   var name = $('#save-create-name').value.trim();
   var password = $('#save-create-password').value;
+  var confirmacion = $('#save-create-password-confirm').value;
   var errorEl = $('#save-create-error');
   errorEl.classList.add('hidden');
 
-  if (!password) {
-    errorEl.textContent = t('password_required');
+  var errorPassword = validarPassword(password, confirmacion);
+  if (errorPassword) {
+    errorEl.textContent = errorPassword;
     errorEl.classList.remove('hidden');
     return;
   }
@@ -778,11 +983,13 @@ $('#btn-save-created').addEventListener('click', async function() {
 $('#btn-save-imported').addEventListener('click', async function() {
   var name = $('#save-import-name').value.trim();
   var password = $('#save-import-password').value;
+  var confirmacion = $('#save-import-password-confirm').value;
   var errorEl = $('#save-import-error');
   errorEl.classList.add('hidden');
 
-  if (!password) {
-    errorEl.textContent = t('password_required');
+  var errorPassword = validarPassword(password, confirmacion);
+  if (errorPassword) {
+    errorEl.textContent = errorPassword;
     errorEl.classList.remove('hidden');
     return;
   }
@@ -816,7 +1023,7 @@ $('#btn-confirm-reveal').addEventListener('click', async function() {
   container.innerHTML = '';
 
   if (!password) {
-    alert(t('enter_password'));
+    showAlert(t('enter_password'));
     return;
   }
 
@@ -856,7 +1063,7 @@ $('#btn-confirm-reveal').addEventListener('click', async function() {
 
     $('#reveal-password-field').classList.add('hidden');
   } catch (err) {
-    alert(err.message || t('decrypt_error'));
+    showAlert(err.message || t('decrypt_error'));
   }
 });
 
@@ -880,8 +1087,16 @@ $('#btn-go-history').addEventListener('click', async function() {
   container.innerHTML = '<div class="loading">' + t('loading_history') + '</div>';
 
   try {
-    var history = await window.api.getHistory(w.id);
+    var historyResult = await window.api.getHistory(w.id);
+    var history = historyResult.transactions;
     container.innerHTML = '';
+
+    if (historyResult.verification && !historyResult.verification.verified) {
+      container.appendChild(buildVerificationWarning(historyResult.verification));
+    }
+    if (historyResult.chain) {
+      container.appendChild(buildChainNote(historyResult.chain));
+    }
 
     if (history.length === 0) {
       container.innerHTML = '<div class="hint" style="text-align: center; padding: 2rem;">' + t('no_transactions') + '</div>';
@@ -915,9 +1130,10 @@ $('#btn-go-history').addEventListener('click', async function() {
           '<div style="font-size: 14px; font-weight: 600; margin-bottom: 4px;">' +
             (isPositive ? t('received') : t('sent')) +
             ' <span style="color: var(--muted); font-weight: normal; font-size: 12px; margin-left: 6px;">' + date + statusText + '</span>' +
+            spvBadge(tx.verification) +
           '</div>' +
-          '<div style="font-family: monospace; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="' + tx.txid + '">' +
-            '<a href="https://blockchair.com/bitcoin-cash/transaction/' + tx.txid + '" target="_blank" style="color: var(--muted); text-decoration: none;">' + tx.txid + '</a>' +
+          '<div style="font-family: monospace; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="' + escapeHtml(tx.txid) + '">' +
+            txidLink(tx.txid) +
           '</div>' +
         '</div>' +
         '<div style="text-align: right;">' +
@@ -1018,13 +1234,85 @@ $('#btn-confirm-send').addEventListener('click', async function() {
     return;
   }
 
+  // Paso 1: calcular la comision real SIN la contrasena y mostrarsela al
+  // usuario. Enviar es irreversible: tiene que ver a donde va y cuanto sale
+  // antes de que la semilla se descifre.
+  var plan;
   try {
-    var txid = await window.api.sendBch(selectedWalletId, password, address, amount);
+    statEl.textContent = t('checking_tx');
+    plan = await window.api.prepareSend(selectedWalletId, address, amount);
+  } catch (err) {
     statEl.classList.add('hidden');
+    errEl.textContent = err.message || t('send_error');
+    errEl.classList.remove('hidden');
+    return;
+  }
+
+  statEl.classList.add('hidden');
+
+  var fila = function(label, value, cls) {
+    return '<div class="tx-review-row">' +
+      '<span class="tx-review-label">' + escapeHtml(label) + '</span>' +
+      '<span class="tx-review-value' + (cls ? ' ' + cls : '') + '">' + escapeHtml(value) + '</span>' +
+      '</div>';
+  };
+  var bch = function(sats) { return (sats / 1e8).toFixed(8).replace(/\.?0+$/, '') + ' BCH'; };
+  var plural = function(n, claveUno, claveVarios) {
+    return n + ' ' + t(n === 1 ? claveUno : claveVarios);
+  };
+
+  // Cuantas direcciones se exponen es parte de lo que se aprueba, igual que el
+  // monto: unir direcciones publica en la cadena que son del mismo dueño, y eso
+  // no se deshace despues.
+  var origen = plural(plan.inputCount, 'coin_one', 'coin_many') + ' · ' +
+    plural(plan.addressCount, 'address_one', 'address_many');
+
+  var avisos = '<div class="tx-review-note">' + escapeHtml(t('review_warning')) + '</div>';
+  if (plan.merged) {
+    avisos += '<div class="tx-review-note tx-review-privacy">' +
+      escapeHtml(t('review_merge_warning', { addresses: plan.addressCount })) + '</div>';
+  }
+  if (plan.skippedCount > 0) {
+    avisos += '<div class="tx-review-note">' +
+      escapeHtml(t('review_dust_skipped', { count: plan.skippedCount, sats: plan.skippedSats })) +
+      '</div>';
+  }
+
+  var confirmado = await showConfirm({
+    title: t('confirm_send_title'),
+    confirmText: t('confirm_send_button'),
+    danger: true,
+    bodyHtml:
+      '<div class="tx-review">' +
+        fila(t('review_to'), plan.toAddress) +
+        fila(t('review_amount'), bch(plan.amountSats), 'amount') +
+        fila(t('review_fee'), bch(plan.feeSats)) +
+        fila(t('review_inputs'), origen) +
+        (plan.changeSats > 0 ? fila(t('review_change'), bch(plan.changeSats)) : '') +
+        fila(t('review_total'), bch(plan.amountSats + plan.feeSats)) +
+      '</div>' +
+      avisos,
+  });
+
+  if (!confirmado) return;
+
+  // Paso 2: recien ahora se descifra la semilla y se firma.
+  statEl.classList.remove('hidden');
+  statEl.textContent = t('building_tx');
+
+  try {
+    var res = await window.api.sendBch(selectedWalletId, password, address, amount);
+    statEl.classList.add('hidden');
+
+    var txid = res && res.txid;
+    var enlace = isTxid(txid)
+      ? '<a href="https://blockchair.com/bitcoin-cash/transaction/' + encodeURIComponent(txid) + '" style="color: #4CAF50; word-break: break-all;">' + escapeHtml(txid) + '</a>'
+      : '<span style="word-break: break-all;">' + escapeHtml(String(txid || '')) + '</span>';
+
     resEl.innerHTML =
-      '<div class="ok" style="color: #4CAF50; font-weight: bold;">' + t('tx_success') + '</div>' +
-      '<div class="hash" style="margin-top: 10px;">TXID:<br> <a href="https://blockchair.com/bitcoin-cash/transaction/' + txid + '" target="_blank" style="color: #4CAF50; word-break: break-all;">' + txid + '</a></div>' +
-      '<button class="btn" id="btn-back-after-send" style="margin-top: 1rem">' + t('back_to_home') + '</button>';
+      '<div class="ok" style="color: #4CAF50; font-weight: bold;">' + escapeHtml(t('tx_success')) + '</div>' +
+      '<div class="hash" style="margin-top: 10px;">TXID:<br> ' + enlace + '</div>' +
+      '<button class="btn" id="btn-back-after-send" style="margin-top: 1rem">' + escapeHtml(t('back_to_home')) + '</button>';
     resEl.classList.remove('hidden');
     document.getElementById('btn-back-after-send').addEventListener('click', function() { goTo('welcome'); });
   } catch (err) {
@@ -1091,6 +1379,7 @@ function setTorStartingUI(message) {
 }
 
 function setTorConnectedUI() {
+  var veniaSinTor = torState !== 'ready';
   torState = 'ready';
   torStatusText.textContent = t('tor_connected');
   torLabel.title = '';
@@ -1099,6 +1388,9 @@ function setTorConnectedUI() {
   newCircuitBtn.disabled = false;
   renderPriceStatus();
   updateAllFiatDisplays();
+  // Los saldos quedaron sin pedir mientras Tor arrancaba: ahora que hay red,
+  // se cargan solos y el usuario no tiene que recargar nada.
+  if (veniaSinTor) loadSavedWallets();
 }
 
 newCircuitBtn.addEventListener('click', async function() {
@@ -1110,7 +1402,7 @@ newCircuitBtn.addEventListener('click', async function() {
     setTimeout(function() { newCircuitBtn.textContent = t('new_circuit'); }, 2000);
     refreshPrice({ silent: false, force: true });
   } catch (err) {
-    alert(t('circuit_error') + err.message);
+    showAlert(t('circuit_error') + err.message);
     newCircuitBtn.textContent = t('new_circuit');
   }
   newCircuitBtn.disabled = false;

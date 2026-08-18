@@ -2,8 +2,21 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
+  <!-- script-src sigue SIN 'unsafe-inline': eso es lo que impide que datos del
+       servidor Electrum inyectados en el DOM lleguen a ejecutarse.
+       style-src necesita 'unsafe-inline' porque la UI usa atributos style="";
+       no abre riesgo real porque default-src 'self' y connect-src 'self'
+       bloquean cualquier carga externa por la que se pudiera exfiltrar. -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;" />
+        content="default-src 'self';
+                 script-src 'self';
+                 style-src 'self' 'unsafe-inline';
+                 img-src 'self' data:;
+                 connect-src 'self';
+                 object-src 'none';
+                 base-uri 'none';
+                 form-action 'none';
+                 frame-ancestors 'none';" />
   <title>Ghost Wallet</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -104,6 +117,10 @@
             <span data-i18n="password_label">Contraseña de seguridad (para encriptar la clave privada)</span>
             <input type="password" id="save-create-password" data-i18n-placeholder="password_placeholder" placeholder="Tu contraseña" />
           </label>
+          <label class="field">
+            <span data-i18n="password_confirm_label">Repetí la contraseña</span>
+            <input type="password" id="save-create-password-confirm" data-i18n-placeholder="password_confirm_placeholder" placeholder="Repetí tu contraseña" />
+          </label>
           <button class="btn success" id="btn-save-created" data-i18n="save_button">Guardar en la compu</button>
           <div id="save-create-error" class="error hidden"></div>
         </div>
@@ -144,6 +161,10 @@
         <label class="field">
           <span data-i18n="password_label">Contraseña de seguridad (para encriptar la clave privada)</span>
           <input type="password" id="save-import-password" data-i18n-placeholder="password_placeholder" placeholder="Tu contraseña" />
+        </label>
+        <label class="field">
+          <span data-i18n="password_confirm_label">Repetí la contraseña</span>
+          <input type="password" id="save-import-password-confirm" data-i18n-placeholder="password_confirm_placeholder" placeholder="Repetí tu contraseña" />
         </label>
         <button class="btn success" id="btn-save-imported" data-i18n="save_button">Guardar en la compu</button>
         <div id="save-import-error" class="error hidden"></div>
@@ -240,6 +261,18 @@
   <footer class="author-signature">
     <span data-i18n="created_by">Creado por</span> <a href="https://munia.cash/profile/madsatcash" target="_blank">MadSatCash</a>
   </footer>
+
+  <!-- Modal generico: confirmaciones y avisos. Reemplaza alert()/confirm() -->
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <h3 id="modal-title" class="modal-title"></h3>
+      <div id="modal-body" class="modal-body"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost hidden" id="modal-cancel"></button>
+        <button class="btn" id="modal-ok"></button>
+      </div>
+    </div>
+  </div>
 
   <script src="i18n.js"></script>
   <script src="renderer.js"></script>

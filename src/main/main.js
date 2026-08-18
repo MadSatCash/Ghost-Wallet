@@ -7,9 +7,84 @@ const path = require('node:path');
 const wallet = require('../core/wallet');
 const network = require('../core/network');
 const storage = require('../core/storage');
+const chain = require('../core/chain');
+const chainsync = require('../core/chainsync');
+const spv = require('../core/spv');
+const coinselect = require('../core/coinselect');
 const torManager = require('./torManager');
 
 const isHdWallet = (w) => Boolean(w && (w.type === 'mnemonic' || w.type === 'hex_hd'));
+
+// Sincroniza la cadena de cabeceras sin bloquear nada.
+//
+// No propaga errores a proposito: si la sincronizacion falla, la wallet sigue
+// andando con el cruce entre operadores y la UI avisa que la verificacion por
+// proof-of-work no esta disponible. Es una capa que se suma, no un requisito.
+// Cuanto esperar antes de empezar a bajar cabeceras. Le da al arranque de la
+// wallet el pool entero para si: primero que el usuario vea su saldo, despues
+// se sincroniza la cadena.
+const DEMORA_SYNC_MS = 6000;
+
+function arrancarSincronizacionDeCadena(win) {
+  const avisar = (estado) => {
+    if (win && !win.isDestroyed()) win.webContents.send('chain:progress', estado);
+  };
+
+  new Promise(resolve => setTimeout(resolve, DEMORA_SYNC_MS))
+    .then(() => chainsync.sync(avisar))
+    .then((final) => {
+      avisar(final);
+      if (final.error) console.warn('[Cadena] Sincronizacion incompleta:', final.error);
+      else console.log(`[Cadena] Verificada por PoW hasta el bloque ${final.tipHeight}.`);
+    })
+    .catch((e) => console.warn('[Cadena] Fallo la sincronizacion:', e.message));
+}
+
+// Verifica por SPV una tanda de transacciones ya confirmadas.
+//
+// Cada una necesita su propia prueba de inclusion, asi que van con un limite de
+// concurrencia: sobre Tor, cincuenta requests sueltas de golpe tardan mas que
+// ocho en vuelo bien administradas.
+async function verificarTransacciones(transacciones) {
+  const CONCURRENCIA = 8;
+  const pendientes = transacciones.slice();
+
+  async function trabajador() {
+    while (pendientes.length > 0) {
+      const tx = pendientes.shift();
+      if (!tx) return;
+
+      if (tx.height <= 0) {
+        tx.verification = { verified: false, reason: 'sin-confirmar', detail: 'Todavia en el mempool.' };
+        continue;
+      }
+      if (!chainsync.puedeVerificar(tx.height)) {
+        // Anterior al checkpoint: no es sospechosa, simplemente cae fuera del
+        // tramo de cadena que la wallet tiene verificado.
+        tx.verification = {
+          verified: false,
+          reason: 'fuera-de-rango',
+          detail: `El bloque ${tx.height} es anterior al checkpoint (${chain.CHECKPOINT.height}).`,
+        };
+        continue;
+      }
+
+      try {
+        const proof = await network.getMerkleProof(tx.txid, tx.height);
+        tx.verification = spv.verifyTransaction(tx.txid, tx.height, proof);
+      } catch (e) {
+        tx.verification = {
+          verified: false,
+          reason: 'sin-prueba',
+          detail: 'No pude obtener la prueba de inclusion: ' + String(e.message || e),
+        };
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: CONCURRENCIA }, trabajador));
+  return transacciones;
+}
 
 // ============================================================
 // BIP44 gap-limit address discovery
@@ -33,6 +108,27 @@ const NETWORK_FAILURE_ABORT_RATIO = 0.5;
 // True si la fraccion de fallas justifica abortar la operacion.
 function tooManyNetworkFailures(failures, total) {
   return total > 0 && failures * 2 > total;
+}
+
+// El saldo de una wallet HD es la suma de muchas direcciones. Alcanza con que
+// UNA no haya pasado el cruce entre operadores para que el total deje de estar
+// verificado: no se puede decir "el saldo es correcto" si una parte esta en duda.
+function aggregateVerification(balances) {
+  const conDatos = (balances || []).filter(b => b && b.verification);
+  if (conDatos.length === 0) {
+    return { verified: false, detail: 'Sin datos de verificacion cruzada.' };
+  }
+
+  const dudosas = conDatos.filter(b => !b.verification.verified);
+  if (dudosas.length === 0) {
+    return { verified: true, detail: conDatos[0].verification.detail };
+  }
+
+  return {
+    verified: false,
+    detail: `${dudosas.length} de ${conDatos.length} direcciones no pasaron la verificacion cruzada. ` +
+            dudosas[0].verification.detail,
+  };
 }
 
 async function discoverHdChain(xpub, branch, startFrom = 0) {
@@ -151,20 +247,41 @@ function createWindow() {
   win.maximize();
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
-  // Seguridad: bloquear navegacion interna pero permitir enlaces web en el navegador externo.
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('http:') || url.startsWith('https:')) {
-      require('electron').shell.openExternal(url);
+  // Seguridad: bloquear TODA navegacion, y abrir en el navegador externo solo
+  // los dominios que la app usa de verdad.
+  //
+  // Antes se abria cualquier http(s). Como el historial inyecta datos que vienen
+  // del servidor Electrum (que no es de confianza), un servidor hostil podia
+  // fabricar una URL y hacer que se abriera sola en el navegador del usuario,
+  // fuera de Tor. Con allowlist, lo peor que puede hacer es que no se abra nada.
+  const DOMINIOS_PERMITIDOS = new Set([
+    'blockchair.com',
+    'www.blockchair.com',
+  ]);
+
+  function abrirEnNavegador(rawUrl) {
+    let url;
+    try {
+      url = new URL(rawUrl);
+    } catch {
+      return false;
     }
+    if (url.protocol !== 'https:') return false;
+    if (!DOMINIOS_PERMITIDOS.has(url.hostname)) {
+      console.warn('Navegacion externa bloqueada hacia un dominio no permitido:', url.hostname);
+      return false;
+    }
+    require('electron').shell.openExternal(url.toString());
+    return true;
+  }
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    abrirEnNavegador(url);
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (event, url) => {
-    if (url.startsWith('http:') || url.startsWith('https:')) {
-      event.preventDefault();
-      require('electron').shell.openExternal(url);
-    } else {
-      event.preventDefault();
-    }
+    event.preventDefault();
+    abrirEnNavegador(url);
   });
 }
 
@@ -200,9 +317,22 @@ function registerIpc() {
     
     // Configurar el puerto dinámico asignado para el proxy SOCKS
     const socksPort = torManager.getSocksPort();
+
+    // Solo reiniciar las conexiones si algo cambio de verdad.
+    //
+    // El renderer puede llamar a tor:enable mas de una vez (arranque automatico
+    // y boton). Desconectar cuando ya estaba todo bien mata los sockets que en
+    // ese mismo momento estan bajando cabeceras, y la sincronizacion se cae con
+    // "Connection lost" sin que haya pasado nada malo.
+    const cambioAlgo = !network.isTorEnabled() || network.torPort() !== socksPort;
     network.setTorPort(socksPort);
     network.setUseTor(true);
-    network.disconnect(); // force reconnect
+    if (cambioAlgo) network.disconnect();
+
+    // Con Tor arriba ya se puede verificar la cadena. Va en segundo plano a
+    // proposito: la wallet es usable desde el primer segundo con el cruce entre
+    // operadores, y el blindaje por proof-of-work se suma cuando termina.
+    arrancarSincronizacionDeCadena(win);
     return true;
   });
 
@@ -251,6 +381,15 @@ function registerIpc() {
   // --- Red (saldos y precio) ---
   ipcMain.handle('net:getBalance', (_e, address) => network.getBalance(address));
   ipcMain.handle('net:getBchPrice', (_e, currencies, force) => network.fetchBchPrice(currencies, { force }));
+  ipcMain.handle('net:poolStatus', () => network.poolStatus());
+
+  // --- Cadena de cabeceras (verificacion por proof-of-work) ---
+  ipcMain.handle('chain:status', () => chainsync.estado());
+  ipcMain.handle('chain:sync', async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    arrancarSincronizacionDeCadena(win);
+    return chainsync.estado();
+  });
 
   // Importar secreto de 64: calcula las dos direcciones posibles, consulta el
   // saldo de cada una y elige automaticamente la que tenga fondos.
@@ -314,7 +453,8 @@ function registerIpc() {
       unconfirmed,
       details,
       receiveAddresses: resolved.receiveAddresses,
-      server: network.serverName()
+      server: network.serverName(),
+      verification: aggregateVerification(results)
     };
   });
 
@@ -333,7 +473,7 @@ function registerIpc() {
       confirmed += b.confirmed;
       unconfirmed += b.unconfirmed;
     });
-    return { confirmed, unconfirmed, failures };
+    return { confirmed, unconfirmed, failures, verification: aggregateVerification(results) };
   }
 
   // Reporte de importacion de mnemonic: gap-limit en ambas ramas para no
@@ -364,6 +504,7 @@ function registerIpc() {
         unconfirmed: rBal.unconfirmed + cBal.unconfirmed,
       },
       server: network.serverName(),
+      verification: aggregateVerification([rBal, cBal]),
     };
   }
 
@@ -377,47 +518,90 @@ function registerIpc() {
     return hdImportReport(xpub, count);
   });
 
+  // Junta los UTXOs gastables de una wallet. Para wallets HD tambien devuelve
+  // el resultado del discovery, que el envio necesita para la direccion de
+  // cambio. Aborta si fallo demasiada red: mejor un error que una tx incompleta.
+  async function collectSpendableUtxos(w) {
+    if (!isHdWallet(w)) {
+      const u = await network.getUtxos(w.address);
+      return { utxos: (u || []).map(x => ({ ...x, address: w.address })), resolved: null };
+    }
+
+    const resolved = await resolveHdWalletAddresses(w);
+    const utxos = [];
+    let failures = 0;
+    const disputadas = [];
+
+    await Promise.all(resolved.allAddresses.map(async (a) => {
+      try {
+        const u = await network.getUtxos(a.address);
+        if (u && u.length > 0) {
+          u.forEach(x => utxos.push({ ...x, address: a.address, change: a.change, index: a.index }));
+        }
+      } catch (e) {
+        // Discrepancia entre operadores != timeout. La primera no se arregla
+        // reintentando y el usuario tiene que verla; la segunda si.
+        if (e && e.consensusFailure) disputadas.push({ address: a.address, detail: e.message });
+        else failures++;
+      }
+    }));
+
+    if (disputadas.length > 0) {
+      throw new Error(
+        'Los servidores no coinciden sobre los fondos de esta wallet, asi que no se firma nada.\n\n' +
+        disputadas.map(d => '· ' + d.detail).join('\n\n')
+      );
+    }
+
+    if (tooManyNetworkFailures(failures, resolved.allAddresses.length)) {
+      throw new Error('Error de red: fallaron demasiadas consultas de UTXOs. Reintenta antes de enviar para no dejar fondos afuera de la transaccion.');
+    }
+    return { utxos, resolved };
+  }
+
   // Estimar el maximo enviable calculando el fee real segun cantidad de UTXOs.
-  // No necesita el password: solo mira los UTXOs. Coincide con la formula
-  // usada por buildAndSignTx cuando el change seria dust (send-max).
+  // No necesita el password: solo mira los UTXOs.
+  //
+  // Vaciar la wallet es la unica operacion que barre todas las direcciones a
+  // proposito, asi que devuelve cuantas va a unir para poder avisarlo.
   ipcMain.handle('wallet:estimateMaxSend', async (_e, id) => {
     const wallets = storage.listWalletsPublic();
     const w = wallets.find(x => x.id === id);
     if (!w) throw new Error('Wallet no encontrada');
 
-    const DUST_LIMIT = 546;
-    let utxos = [];
-    if (!isHdWallet(w)) {
-      const u = await network.getUtxos(w.address);
-      if (u) utxos = u;
-    } else {
-      const resolved = await resolveHdWalletAddresses(w);
-      let failures = 0;
-      const promises = resolved.allAddresses.map(async (a) => {
-        try {
-          const u = await network.getUtxos(a.address);
-          if (u && u.length > 0) u.forEach(x => utxos.push(x));
-        } catch (e) { failures++; }
-      });
-      await Promise.all(promises);
-      if (tooManyNetworkFailures(failures, resolved.allAddresses.length)) {
-        throw new Error('Error de red: fallaron demasiadas consultas de UTXOs (el maximo enviable podria estar subestimado).');
-      }
-    }
+    const { utxos } = await collectSpendableUtxos(w);
+    const plan = coinselect.planMaxSend({ utxos, feeRate: 1 });
 
-    const totalSats = utxos.reduce((s, u) => s + u.value, 0);
-    const n = utxos.length;
-    const BASE_SIZE = 10;
-    const INPUT_SIZE = 149;
-    const OUTPUT_SIZE = 34;
-    const feeRate = 1;
-    const feeSats = n === 0
-      ? 0
-      : Math.ceil((BASE_SIZE + n * INPUT_SIZE + 1 * OUTPUT_SIZE) * feeRate);
-    let maxSats = Math.max(0, totalSats - feeSats);
-    if (maxSats < DUST_LIMIT) maxSats = 0;
+    return {
+      totalSats: plan.totalSats,
+      feeSats: plan.feeSats,
+      maxSats: plan.maxSats,
+      utxoCount: plan.utxoCount,
+      addressCount: plan.addressCount,
+      leftOut: plan.leftOut,
+      skippedCount: plan.skipped.length,
+      skippedSats: plan.skipped.reduce((s, u) => s + u.value, 0),
+    };
+  });
 
-    return { totalSats, feeSats, maxSats, utxoCount: n };
+  // Previsualizar un envio: monto, comision y cambio, SIN pedir la contrasena
+  // ni tocar claves privadas. Es lo que alimenta la pantalla de confirmacion.
+  ipcMain.handle('wallet:prepareSend', async (_e, id, toAddress, amountBch) => {
+    const wallets = storage.listWalletsPublic();
+    const w = wallets.find(x => x.id === id);
+    if (!w) throw new Error('Wallet no encontrada');
+
+    // Validar destino y monto antes de salir a la red.
+    wallet.parseMainnetAddress(toAddress);
+    const amountSats = wallet.bchToSats(amountBch);
+
+    const { utxos } = await collectSpendableUtxos(w);
+    if (utxos.length === 0) throw new Error('No hay fondos suficientes (0 UTXOs).');
+
+    // `inputs` se queda en el proceso principal: al frontend solo van los
+    // numeros que el usuario necesita para decidir.
+    const { inputs, ...plan } = wallet.planSend({ utxos, toAddress, amountSats, feeRate: 1 });
+    return { ...plan, toAddress, walletName: w.name };
   });
 
   // Enviar BCH
@@ -426,8 +610,23 @@ function registerIpc() {
     const w = wallets.find(x => x.id === id);
     if (!w) throw new Error('Wallet no encontrada');
 
+    // Validar ANTES de descifrar la semilla: si el destino o el monto estan
+    // mal, la clave privada nunca llega a existir en memoria.
+    wallet.parseMainnetAddress(toAddress);
+    const amountSats = wallet.bchToSats(amountBch);
+
     const secret = storage.getDecryptedSecret(id, password);
-    let inputs = [];
+    const { utxos, resolved } = await collectSpendableUtxos(w);
+    if (utxos.length === 0) throw new Error('No hay fondos suficientes (0 UTXOs).');
+
+    // Elegir las monedas ANTES de derivar claves: se firma solo lo que entra en
+    // la transaccion, no la wallet entera. Es la misma llamada que hizo la
+    // pantalla de confirmacion, y es determinista, asi que lo que el usuario
+    // aprobo es lo que se firma.
+    const plan = wallet.planSend({ utxos, toAddress, amountSats, feeRate: 1 });
+    const elegidos = plan.inputs;
+
+    let inputs;
     let changeAddress;
     // Guardamos aca el proximo changeIndex a persistir tras un envio exitoso.
     // Base = resolved.changeIndex (post-discovery), NO w.changeIndex, que
@@ -435,48 +634,22 @@ function registerIpc() {
     let nextChangeIndexToPersist = null;
 
     if (!isHdWallet(w)) {
-      const u = await network.getUtxos(w.address);
-      if (!u || u.length === 0) throw new Error('No hay fondos suficientes (0 UTXOs).');
-      u.forEach(x => inputs.push({ ...x, address: w.address, privKeyHex: secret }));
+      inputs = elegidos.map(x => ({ ...x, privKeyHex: secret }));
       changeAddress = w.address;
     } else {
-      const resolved = await resolveHdWalletAddresses(w);
-
-      let utxoFailures = 0;
-      const promises = resolved.allAddresses.map(async (a) => {
-        try {
-          const u = await network.getUtxos(a.address);
-          if (u && u.length > 0) {
-            const privKeyHex = w.type === 'hex_hd'
-              ? wallet.getPrivateKeyHexForHexHdPath(secret, 0, a.change, a.index)
-              : wallet.getPrivateKeyHexForPath(secret, 0, a.change, a.index);
-            u.forEach(x => inputs.push({ ...x, address: a.address, privKeyHex }));
-          }
-        } catch(e) { utxoFailures++; }
-      });
-      await Promise.all(promises);
-
-      // Chequeo critico: si fallaron demasiados getUtxos, podriamos estar
-      // firmando una tx con inputs incompletos (dejando UTXOs "atrapados"
-      // en direcciones que no consultamos con exito) o incluso el UTXO
-      // grande podria estar ausente. Abortar en vez de mandar una tx menor
-      // a lo que el usuario cree que esta enviando.
-      if (tooManyNetworkFailures(utxoFailures, resolved.allAddresses.length)) {
-        throw new Error('Error de red: fallaron demasiadas consultas de UTXOs. Reintenta antes de enviar para no dejar fondos afuera de la transaccion.');
-      }
-
-      if (inputs.length === 0) {
-        throw new Error('No hay fondos suficientes (0 UTXOs).');
-      }
-
+      inputs = elegidos.map(x => ({
+        ...x,
+        privKeyHex: w.type === 'hex_hd'
+          ? wallet.getPrivateKeyHexForHexHdPath(secret, 0, x.change, x.index)
+          : wallet.getPrivateKeyHexForPath(secret, 0, x.change, x.index)
+      }));
       // Nueva direccion de change: la primera libre segun lo descubierto.
       const newChangeNode = wallet.getAddressesFromXPub(w.xpub, 1, resolved.changeIndex, 1)[0];
       changeAddress = newChangeNode.address;
       nextChangeIndexToPersist = resolved.changeIndex + 1;
     }
 
-    const amountSats = Math.floor(parseFloat(amountBch) * 1e8);
-    const rawTxHex = wallet.buildAndSignTx({
+    const built = wallet.buildAndSignTx({
       inputs,
       toAddress,
       changeAddress,
@@ -484,7 +657,15 @@ function registerIpc() {
       feeRate: 1
     });
 
-    const txid = await network.broadcastTransaction(rawTxHex);
+    // El txid es determinista: lo calculamos nosotros a partir de la tx que
+    // firmamos, en vez de creerle al servidor lo que nos devuelva.
+    const txidLocal = require('bitcore-lib-cash').Transaction(built.hex).id;
+    const txidServidor = await network.broadcastTransaction(built.hex);
+
+    if (typeof txidServidor === 'string' && txidServidor.toLowerCase() !== txidLocal.toLowerCase()) {
+      console.warn('El servidor devolvio un txid distinto al calculado localmente.',
+        { servidor: txidServidor, local: txidLocal });
+    }
 
     if (isHdWallet(w) && nextChangeIndexToPersist !== null) {
       try {
@@ -496,7 +677,14 @@ function registerIpc() {
       }
     }
 
-    return txid;
+    return {
+      txid: txidLocal,
+      feeSats: built.feeSats,
+      amountSats,
+      changeSats: built.changeSats,
+      inputCount: built.inputCount,
+      addressCount: plan.addressCount,
+    };
   });
 
   // Incrementar el indice de recepcion de una HD Wallet
@@ -525,11 +713,13 @@ function registerIpc() {
 
     const myAddrs = new Set(allAddrs);
     let historyMap = new Map();
+    const verificaciones = [];
 
     const histPromises = allAddrs.map(async (addr) => {
       try {
-        const h = await network.getHistory(addr);
-        h.forEach(tx => {
+        const { entries, verification } = await network.getHistoryVerified(addr);
+        verificaciones.push({ verification });
+        entries.forEach(tx => {
           if (!historyMap.has(tx.tx_hash)) {
             historyMap.set(tx.tx_hash, tx);
           }
@@ -602,7 +792,13 @@ function registerIpc() {
       return 0;
     });
 
-    return detailedHistory;
+    await verificarTransacciones(detailedHistory);
+
+    return {
+      transactions: detailedHistory,
+      verification: aggregateVerification(verificaciones),
+      chain: chainsync.estado(),
+    };
   });
 }
 

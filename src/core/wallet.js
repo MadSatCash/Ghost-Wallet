@@ -6,6 +6,7 @@
 // tests con vectores conocidos (ver test/wallet.test.js).
 
 const bip39 = require('bip39');
+const coinselect = require('./coinselect');
 
 // libauth es un modulo ESM; lo cargamos con import() dinamico y lo cacheamos.
 let _lib = null;
@@ -190,19 +191,61 @@ function getPrivateKeyHexForHexHdPath(secret, account = 0, change = 0, index = 0
   return child.privateKey.toString();
 }
 
+// Valida que una direccion sea de BCH mainnet y devuelve el objeto Address.
+//
+// Sin esto, bitcore acepta una direccion de testnet y produce una transaccion
+// MAINNET valida hacia un destino cuya clave no controla nadie: los fondos se
+// queman sin vuelta atras.
+function parseMainnetAddress(input, etiqueta = 'La direccion de destino') {
+  const bitcore = require('bitcore-lib-cash');
+  const s = String(input == null ? '' : input).trim();
+  if (!s) throw new Error(etiqueta + ' esta vacia.');
+
+  let addr;
+  try {
+    addr = bitcore.Address.fromString(s, 'livenet');
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (/network/i.test(msg)) {
+      throw new Error(etiqueta + ' no es de Bitcoin Cash mainnet (parece de otra red, como testnet).');
+    }
+    throw new Error(etiqueta + ' no es valida: revisa que este completa y bien copiada.');
+  }
+  if (addr.network.name !== 'livenet') {
+    throw new Error(etiqueta + ' no es de Bitcoin Cash mainnet.');
+  }
+  return addr;
+}
+
+function isValidMainnetAddress(input) {
+  try { parseMainnetAddress(input); return true; } catch { return false; }
+}
+
 // Construye y firma una transaccion usando bitcore-lib-cash
 function buildAndSignTx({ inputs, toAddress, changeAddress, amountSats, feeRate = 1 }) {
   const bitcore = require('bitcore-lib-cash');
-  const privateKeys = inputs.map(i => new bitcore.PrivateKey(i.privKeyHex));
 
-  const INPUT_SIZE = 149;
-  const OUTPUT_SIZE = 34;
-  const BASE_SIZE = 10;
-  const DUST_LIMIT = 546;
+  const DUST_LIMIT = coinselect.DUST_LIMIT;
 
+  // Validar destino y cambio ANTES de tocar claves privadas.
+  const destino = parseMainnetAddress(toAddress, 'La direccion de destino');
+  parseMainnetAddress(changeAddress, 'La direccion de cambio');
+
+  // NaN atravesaba el chequeo de dust porque NaN < 546 es false.
+  if (!Number.isFinite(amountSats)) {
+    throw new Error('El monto a enviar no es un numero valido.');
+  }
+  if (!Number.isInteger(amountSats)) {
+    throw new Error('El monto a enviar debe ser un numero entero de satoshis.');
+  }
   if (amountSats < DUST_LIMIT) {
     throw new Error('El monto a enviar esta por debajo del limite dust de la red (546 sats)');
   }
+  if (!Array.isArray(inputs) || inputs.length === 0) {
+    throw new Error('No hay UTXOs para gastar.');
+  }
+
+  const privateKeys = inputs.map(i => new bitcore.PrivateKey(i.privKeyHex));
 
   const bchUtxos = inputs.map(u => new bitcore.Transaction.UnspentOutput({
     txid: u.tx_hash,
@@ -212,29 +255,91 @@ function buildAndSignTx({ inputs, toAddress, changeAddress, amountSats, feeRate 
     satoshis: u.value
   }));
 
-  const totalIn = inputs.reduce((s, u) => s + u.value, 0);
-  const n = inputs.length;
-
-  const feeWithChange = Math.ceil((BASE_SIZE + n * INPUT_SIZE + 2 * OUTPUT_SIZE) * feeRate);
-  const change = totalIn - amountSats - feeWithChange;
+  // La comision y el cambio salen de la misma formula que uso la seleccion de
+  // monedas. Si se calcularan aca de nuevo, cualquier divergencia entre las dos
+  // cuentas le mostraria al usuario una comision distinta a la que paga.
+  const plan = coinselect.planFor(inputs, amountSats, feeRate);
+  if (!plan.ok) {
+    throw new Error('No alcanza el saldo para cubrir el monto mas la comision de red.');
+  }
+  const { feeSats, changeSats, totalIn, inputCount: n } = plan;
 
   const tx = new bitcore.Transaction().from(bchUtxos);
 
-  if (change >= DUST_LIMIT) {
-    tx.to(toAddress, amountSats)
+  if (changeSats > 0) {
+    tx.to(destino, amountSats)
       .change(changeAddress)
-      .fee(feeWithChange);
+      .fee(feeSats);
   } else {
-    const feeNoChange = Math.ceil((BASE_SIZE + n * INPUT_SIZE + 1 * OUTPUT_SIZE) * feeRate);
-    if (totalIn < amountSats + feeNoChange) {
-      throw new Error('Insufficient funds to cover the transaction fee');
-    }
-    tx.to(toAddress, amountSats)
-      .fee(totalIn - amountSats);
+    // Sin salida de cambio: el remanente por debajo del dust se va en comision.
+    tx.to(destino, amountSats)
+      .fee(feeSats);
   }
 
   tx.sign(privateKeys);
-  return tx.uncheckedSerialize();
+
+  // uncheckedSerialize() se saltea las guardas de bitcore, asi que verificamos
+  // a mano lo unico que importa: que TODOS los inputs quedaron firmados. Sin
+  // esto, una clave desalineada con su direccion produce una tx con scriptSig
+  // vacio que el nodo rechaza con un error incomprensible.
+  const sinFirmar = tx.inputs.findIndex(i => !i.script || i.script.toBuffer().length === 0);
+  if (sinFirmar !== -1) {
+    throw new Error(
+      'La transaccion no se pudo firmar completamente (input ' + sinFirmar + '). ' +
+      'No se transmitio nada.'
+    );
+  }
+
+  return { hex: tx.uncheckedSerialize(), feeSats, changeSats, totalIn, inputCount: n };
+}
+
+// Elige que monedas gastar y calcula comision y cambio, SIN firmar ni tocar
+// claves privadas. Es la unica puerta de entrada a la seleccion: la pantalla de
+// confirmacion y el envio real llaman a esto mismo, asi que lo que el usuario
+// aprueba es exactamente lo que se firma.
+function planSend({ utxos, toAddress, amountSats, feeRate = 1 }) {
+  parseMainnetAddress(toAddress, 'La direccion de destino');
+
+  if (!Number.isFinite(amountSats) || !Number.isInteger(amountSats)) {
+    throw new Error('El monto a enviar no es un numero valido de satoshis.');
+  }
+  if (amountSats < coinselect.DUST_LIMIT) {
+    throw new Error('El monto a enviar esta por debajo del limite dust de la red (546 sats).');
+  }
+
+  const seleccion = coinselect.selectCoins({ utxos, amountSats, feeRate });
+
+  return {
+    inputs: seleccion.inputs,
+    feeSats: seleccion.feeSats,
+    changeSats: seleccion.changeSats,
+    totalIn: seleccion.totalIn,
+    amountSats,
+    inputCount: seleccion.inputCount,
+    addressCount: seleccion.addressCount,
+    merged: seleccion.merged,
+    skippedCount: seleccion.skipped.length,
+    skippedSats: seleccion.skipped.reduce((s, u) => s + u.value, 0),
+  };
+}
+
+// Convierte un monto en BCH escrito por el usuario a satoshis enteros.
+// Se hace con string y no con parseFloat(x)*1e8 porque el float pierde
+// precision: 0.29 * 1e8 da 28999999.999999996, que truncado son 0.28999999 BCH.
+function bchToSats(input) {
+  const s = String(input == null ? '' : input).trim().replace(',', '.');
+  if (!/^\d*\.?\d*$/.test(s) || s === '' || s === '.') {
+    throw new Error('El monto no es un numero valido.');
+  }
+  const [entera, decimal = ''] = s.split('.');
+  if (decimal.length > 8) {
+    throw new Error('Bitcoin Cash tiene 8 decimales como maximo.');
+  }
+  const sats = Number(BigInt(entera || '0') * 100000000n + BigInt((decimal + '00000000').slice(0, 8)));
+  if (!Number.isSafeInteger(sats)) {
+    throw new Error('El monto es demasiado grande.');
+  }
+  return sats;
 }
 
 module.exports = {
@@ -256,4 +361,8 @@ module.exports = {
   getPrivateKeyHexForPath,
   getPrivateKeyHexForHexHdPath,
   buildAndSignTx,
+  planSend,
+  bchToSats,
+  parseMainnetAddress,
+  isValidMainnetAddress,
 };

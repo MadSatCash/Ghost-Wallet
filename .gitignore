@@ -9,3 +9,6 @@ wallets/
 *.seed
 DATA.txt  
  
+
+# Residuo de la suite de tests
+test_data/

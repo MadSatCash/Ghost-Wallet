@@ -12,6 +12,19 @@ try {
 }
 
 const FILE_PATH = path.join(userDataPath, 'wallets.json');
+const TMP_PATH = FILE_PATH + '.tmp';
+const BAK_PATH = FILE_PATH + '.bak';
+
+// Solo el dueño puede leer el archivo. En Windows el modo POSIX es simbolico,
+// pero en Linux/macOS evita que otros usuarios locales lean los secretos.
+const FILE_MODE = 0o600;
+
+// Parametros de derivacion actuales. Se guardan DENTRO de cada registro para
+// poder subirlos mas adelante sin dejar ilegibles las wallets ya guardadas.
+const KDF = { algo: 'pbkdf2', hash: 'sha256', iterations: 600000, keyLength: 32 };
+
+// Registros viejos (sin campo kdf) usaban estos parametros.
+const LEGACY_KDF = { algo: 'pbkdf2', hash: 'sha256', iterations: 100000, keyLength: 32 };
 
 function ensureDirectoryExists() {
   const dir = path.dirname(FILE_PATH);
@@ -20,35 +33,98 @@ function ensureDirectoryExists() {
   }
 }
 
+// Lee y parsea el archivo de billeteras.
+//
+// IMPORTANTE: un archivo ilegible NO puede convertirse en "no hay billeteras".
+// Si devolvieramos [] ante un JSON corrupto, el proximo saveWallet escribiria
+// encima y borraria los secretos cifrados para siempre. Ante la duda,
+// explotamos: es preferible un error visible a una perdida silenciosa.
 function readRawWallets() {
   ensureDirectoryExists();
+  // Archivo ausente = instalacion nueva (o el usuario lo borro a proposito).
+  // NO se recupera del .bak aca: la escritura atomica nunca deja el principal
+  // ausente (el backup se hace con el original todavia en su lugar, y el
+  // rename lo reemplaza de una), asi que resucitar del backup solo lograria
+  // revivir billeteras que alguien borro adrede.
   if (!fs.existsSync(FILE_PATH)) {
     return [];
   }
+
+  const raw = fs.readFileSync(FILE_PATH, 'utf8');
   try {
-    const raw = fs.readFileSync(FILE_PATH, 'utf8');
-    return JSON.parse(raw) || [];
+    return parseWallets(raw, FILE_PATH);
   } catch (e) {
-    console.error('Error leyendo el archivo de billeteras:', e);
-    return [];
+    // El archivo existe pero no se puede leer. Antes de fallar, probamos el
+    // backup: cubre el caso de un corte de luz a mitad de escritura.
+    if (fs.existsSync(BAK_PATH)) {
+      try {
+        const recovered = parseWallets(fs.readFileSync(BAK_PATH, 'utf8'), BAK_PATH);
+        console.warn('wallets.json estaba corrupto; se recupero desde el backup.');
+        return recovered;
+      } catch { /* el backup tampoco sirve */ }
+    }
+    throw new Error(
+      'El archivo de billeteras esta danado y no se pudo recuperar del backup. ' +
+      'NO crees ni importes billeteras nuevas (sobrescribirian lo que queda). ' +
+      'Hace una copia de ' + FILE_PATH + ' antes de seguir. Detalle: ' + e.message
+    );
   }
 }
 
+function parseWallets(raw, origin) {
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed)) {
+    throw new Error('El contenido de ' + origin + ' no es una lista de billeteras.');
+  }
+  return parsed;
+}
+
+// Escritura atomica: temporal -> fsync -> rename, con backup del estado previo.
+// Un corte de luz en cualquier punto deja siempre un archivo integro (el viejo
+// o el nuevo), nunca uno a medias.
 function writeRawWallets(wallets) {
   ensureDirectoryExists();
-  try {
-    fs.writeFileSync(FILE_PATH, JSON.stringify(wallets, null, 2), 'utf8');
-    return true;
-  } catch (e) {
-    console.error('Error escribiendo el archivo de billeteras:', e);
-    return false;
+
+  const payload = JSON.stringify(wallets, null, 2);
+
+  // 1. Backup del estado actual, para poder volver si el rename se corta.
+  if (fs.existsSync(FILE_PATH)) {
+    try {
+      fs.copyFileSync(FILE_PATH, BAK_PATH);
+      fs.chmodSync(BAK_PATH, FILE_MODE);
+    } catch (e) {
+      throw new Error('No se pudo respaldar el archivo de billeteras: ' + e.message);
+    }
   }
+
+  // 2. Escribir el temporal y forzarlo a disco antes de reemplazar nada.
+  let fd;
+  try {
+    fd = fs.openSync(TMP_PATH, 'w', FILE_MODE);
+    fs.writeFileSync(fd, payload, 'utf8');
+    fs.fsyncSync(fd);
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* noop */ }
+    }
+  }
+
+  // 3. Reemplazo atomico.
+  fs.renameSync(TMP_PATH, FILE_PATH);
+  try { fs.chmodSync(FILE_PATH, FILE_MODE); } catch { /* Windows */ }
+
+  return true;
 }
 
-// Encriptación AES-256-GCM
+// --- Cifrado AES-256-GCM ---
+
+function deriveKey(password, salt, params) {
+  return crypto.pbkdf2Sync(password, salt, params.iterations, params.keyLength, params.hash);
+}
+
 function encrypt(text, password) {
   const salt = crypto.randomBytes(16);
-  const key = crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha256');
+  const key = deriveKey(password, salt, KDF);
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
   let encrypted = cipher.update(text, 'utf8', 'hex');
@@ -57,22 +133,29 @@ function encrypt(text, password) {
   return {
     salt: salt.toString('hex'),
     iv: iv.toString('hex'),
-    tag: tag.toString('hex'),
-    encryptedText: encrypted
+    tag: tag,
+    encryptedText: encrypted,
+    kdf: { ...KDF },
   };
 }
 
-// Desencriptación AES-256-GCM
 function decrypt(encryptedObj, password) {
+  // Sin campo kdf => registro viejo, derivado con los parametros originales.
+  const params = encryptedObj.kdf || LEGACY_KDF;
   const salt = Buffer.from(encryptedObj.salt, 'hex');
   const iv = Buffer.from(encryptedObj.iv, 'hex');
   const tag = Buffer.from(encryptedObj.tag, 'hex');
-  const key = crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha256');
+  const key = deriveKey(password, salt, params);
   const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
   decipher.setAuthTag(tag);
   let decrypted = decipher.update(encryptedObj.encryptedText, 'hex', 'utf8');
   decrypted += decipher.final('utf8');
   return decrypted;
+}
+
+function usesCurrentKdf(wallet) {
+  const k = wallet.kdf;
+  return Boolean(k && k.algo === KDF.algo && k.hash === KDF.hash && k.iterations >= KDF.iterations);
 }
 
 // --- API del Storage ---
@@ -118,7 +201,8 @@ function saveWallet({ name, address, type, secret, password, xpub = null }) {
     salt: encrypted.salt,
     iv: encrypted.iv,
     tag: encrypted.tag,
-    encryptedText: encrypted.encryptedText
+    encryptedText: encrypted.encryptedText,
+    kdf: encrypted.kdf
   };
 
   wallets.push(newWallet);
@@ -148,11 +232,35 @@ function getDecryptedSecret(id, password) {
   if (!wallet) {
     throw new Error('Billetera no encontrada.');
   }
+
+  let secret;
   try {
-    return decrypt(wallet, password);
+    secret = decrypt(wallet, password);
   } catch (e) {
+    // GCM falla igual con contraseña incorrecta que con registro corrupto.
+    // Distinguimos por los campos: si falta alguno, el registro esta roto.
+    if (!wallet.salt || !wallet.iv || !wallet.tag || !wallet.encryptedText) {
+      throw new Error('El registro de esta billetera esta incompleto o danado.');
+    }
     throw new Error('Contraseña incorrecta.');
   }
+
+  // Migracion transparente: si la wallet quedo con parametros viejos, la
+  // reciframos con los actuales ahora que tenemos secreto y contraseña.
+  if (!usesCurrentKdf(wallet)) {
+    try {
+      const re = encrypt(secret, password);
+      updateWallet(id, {
+        salt: re.salt, iv: re.iv, tag: re.tag,
+        encryptedText: re.encryptedText, kdf: re.kdf
+      });
+    } catch (e) {
+      // Migrar es una mejora, no una obligacion: nunca romper la operacion.
+      console.error('No se pudo migrar el KDF de la billetera:', e.message);
+    }
+  }
+
+  return secret;
 }
 
 module.exports = {
@@ -162,4 +270,5 @@ module.exports = {
   updateWallet,
   getDecryptedSecret,
   filePath: FILE_PATH, // Para testeo y depuración
+  KDF,
 };

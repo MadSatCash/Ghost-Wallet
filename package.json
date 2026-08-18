@@ -47,15 +47,16 @@
   "dependencies": {
     "@bitauth/libauth": "^3.0.0",
     "@electrum-cash/network": "^4.2.2",
-    "@petersteele/tor-manager": "^1.0.11",
     "bip39": "^3.1.0",
     "bitcore-lib-cash": "^10.10.5",
     "qrcode-generator": "^2.0.4",
+    "socks": "^2.8.9",
     "socks-proxy-agent": "^10.1.0",
-    "tar": "^7.5.16"
+    "tar": "^7.5.22",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
-    "electron": "^31.0.0",
+    "electron": "^43.4.0",
     "electron-builder": "^26.15.3"
   }
 }
