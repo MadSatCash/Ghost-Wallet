@@ -281,23 +281,49 @@ async function getClient() {
 //
 // Esto no hace mas lenta la carga: el techo lo pone Tor, no la cola. Lo que
 // cambia es que la espera se hace ordenada en vez de terminar en timeouts.
-const MAX_CONSULTAS_EN_VUELO = PIPELINE_DEPTH;
+// Medido con las 28 wallets reales (435 direcciones, cada consulta a 3
+// operadores), sobre la red y por Tor:
+//
+//   sin tope     11.892 requests de golpe   fallo masivo, pool caido
+//   tope 4                84.9s              0 fallos
+//   tope 8                47.3s              0 fallos   <- elegido
+//
+// Ocho duplica la velocidad sin costo medible, y deja margen para lo que
+// compite por los mismos circuitos (precio, cabeceras, un envio en curso).
+const MAX_CONSULTAS_EN_VUELO = 8;
 
 // Una cola sola no alcanza: pintar la lista de wallets encola cientos de
 // consultas, y un envio que llega despues quedaria esperando atras de todas
 // ellas. Lo urgente —lo que hace falta para firmar— pasa adelante. Lo que
 // alimenta una pantalla puede esperar.
 let consultasEnVuelo = 0;
+let consultasTotales = 0;
 const esperandoCupo = [];
+
+// Cola larga = alguien esta pidiendo mucho mas de lo que Tor puede entregar, y
+// todo lo que llegue despues va a vencer. Avisa una sola vez por episodio para
+// no llenar la consola.
+//
+// El numero esta por encima del pico legitimo medido: cargar la lista con 28
+// wallets encola ~435 consultas. Si un aviso salta en la operacion normal deja
+// de querer decir algo, asi que el umbral marca lo que ya no es normal.
+const COLA_SOSPECHOSA = 600;
+let yaAvisoCola = false;
 
 async function conCupo(fn, { urgente = false } = {}) {
   if (consultasEnVuelo >= MAX_CONSULTAS_EN_VUELO) {
+    if (esperandoCupo.length >= COLA_SOSPECHOSA && !yaAvisoCola) {
+      yaAvisoCola = true;
+      console.warn(`[Red] ${esperandoCupo.length} consultas esperando cupo. Algo esta pidiendo de mas: por Tor esto termina en timeouts.`);
+    }
     await new Promise(resolve => {
       if (urgente) esperandoCupo.unshift(resolve);
       else esperandoCupo.push(resolve);
     });
   }
+  if (esperandoCupo.length === 0) yaAvisoCola = false;
   consultasEnVuelo++;
+  consultasTotales++;
   try {
     return await fn();
   } finally {
@@ -307,9 +333,15 @@ async function conCupo(fn, { urgente = false } = {}) {
   }
 }
 
-// Cuantas consultas hay en vuelo y cuantas esperando. Para diagnostico.
+// Estado de la cola de consultas. Para diagnostico: cuando algo falla por red,
+// lo primero que hay que saber es si la wallet se estaba tapando sola.
 function estadoDeCola() {
-  return { enVuelo: consultasEnVuelo, esperando: esperandoCupo.length, tope: MAX_CONSULTAS_EN_VUELO };
+  return {
+    enVuelo: consultasEnVuelo,
+    esperando: esperandoCupo.length,
+    tope: MAX_CONSULTAS_EN_VUELO,
+    totales: consultasTotales,
+  };
 }
 
 async function queryAll(method, ...params) {

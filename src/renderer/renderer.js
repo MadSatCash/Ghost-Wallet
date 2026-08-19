@@ -864,8 +864,12 @@ async function loadSavedWallets() {
       return;
     }
 
+    // La lista va en modo rapido: sin consultas de descubrimiento. El costo de
+    // esta pantalla se multiplica por la cantidad de wallets guardadas, y el
+    // barrido completo de cada una hacia que abrir la app disparara miles de
+    // consultas de golpe por Tor. El detalle de cada wallet si barre completo.
     var balancePromise = isHdWalletType(w.type)
-      ? window.api.getHdBalance(w.id)
+      ? window.api.getHdBalance(w.id, { rapido: true })
       : window.api.getBalance(w.address);
     balancePromise.then(function(b) {
       var balEl = document.getElementById('bal-' + w.id);

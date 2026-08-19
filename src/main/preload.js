@@ -19,7 +19,7 @@ contextBridge.exposeInMainWorld('api', {
   resolveHexSecret: (hex) => ipcRenderer.invoke('net:resolveHexSecret', hex),
   mnemonicReport: (mnemonic, count) => ipcRenderer.invoke('net:mnemonicReport', mnemonic, count),
   hexHdReport: (hex, count) => ipcRenderer.invoke('net:hexHdReport', hex, count),
-  getHdBalance: (id) => ipcRenderer.invoke('wallet:getHdBalance', id),
+  getHdBalance: (id, opciones) => ipcRenderer.invoke('wallet:getHdBalance', id, opciones),
   getHistory: (id) => ipcRenderer.invoke('wallet:getHistory', id),
   incrementReceiveIndex: (id) => ipcRenderer.invoke('wallet:incrementReceiveIndex', id),
   

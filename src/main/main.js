@@ -205,6 +205,39 @@ async function discoverHdChain(xpub, branch, startFrom = 0) {
   return { addresses: discovered, maxIndexWithActivity, failures, hitHardCap };
 }
 
+// Cuantas direcciones se miran mas alla del ultimo indice conocido cuando NO
+// se hace el barrido completo. No es un gap limit: es un margen de cortesia
+// para notar que aparecio actividad nueva y disparar el barrido de verdad.
+const VENTANA_CORTESIA = 5;
+
+// Direcciones ya conocidas de una wallet, derivadas sin tocar la red.
+//
+// Por que existe: el barrido BIP44 pregunta por el historial de cada direccion
+// para saber donde termina la wallet, y eso cuesta ~80 consultas por wallet
+// por mas que la wallet tenga dos direcciones usadas — el gap limit de 20 en
+// dos ramas se paga entero siempre. Para pintar una fila de la lista eso no
+// hace falta: `wallets.json` ya guarda hasta que indice llego cada rama.
+//
+// Medido sobre 28 wallets reales: 1.982 direcciones barridas contra 175
+// conocidas. El 91% del trabajo era redescubrir lo que ya estaba anotado.
+function direccionesConocidas(w, ventana = VENTANA_CORTESIA) {
+  const hastaReceive = Math.max(w.receiveIndex || 0, 1) + ventana;
+  const hastaChange  = (w.changeIndex  || 0) + ventana;
+
+  const receive = wallet.getAddressesFromXPub(w.xpub, 0, 0, hastaReceive);
+  const change  = hastaChange > 0 ? wallet.getAddressesFromXPub(w.xpub, 1, 0, hastaChange) : [];
+
+  // Indice a partir del cual estamos mirando "de mas". Si aparece actividad
+  // de aca en adelante, la wallet crecio por fuera y hay que barrer en serio.
+  return {
+    receiveAddresses: receive,
+    changeAddresses: change,
+    allAddresses: [...receive, ...change],
+    desdeReceive: Math.max(w.receiveIndex || 0, 1),
+    desdeChange: w.changeIndex || 0,
+  };
+}
+
 // Descubre direcciones de ambas ramas y persiste los indices en storage.
 async function resolveHdWalletAddresses(w) {
   if (!isHdWallet(w) || !w.xpub) throw new Error('Wallet HD no encontrada');
@@ -431,33 +464,64 @@ function registerIpc() {
   });
 
   // Consultar balance total de una billetera HD.
-  // Usa gap-limit discovery para encontrar TODAS las direcciones con actividad
-  // en ambas ramas (receive y change), incluso mas alla del ultimo indice
-  // conocido — necesario cuando la seed viene importada de otra wallet.
-  ipcMain.handle('wallet:getHdBalance', async (_e, id) => {
+  //
+  // Dos modos, porque las dos pantallas que lo usan tienen necesidades
+  // distintas:
+  //
+  //   completo (default) — barrido BIP44 con gap limit. Encuentra actividad en
+  //     indices que esta wallet nunca genero, que es el caso de una seed
+  //     importada de otra billetera. Es el modo del detalle de una wallet.
+  //
+  //   rapido — solo las direcciones ya conocidas, sin consultas de
+  //     descubrimiento. Es el modo de la LISTA, donde el costo se multiplica
+  //     por la cantidad de wallets guardadas. Si aparece actividad dentro de la
+  //     ventana de cortesia, esa wallet se rebarre completa en el momento: sale
+  //     barato en el caso normal y sigue siendo correcto en el raro.
+  ipcMain.handle('wallet:getHdBalance', async (_e, id, opciones = {}) => {
     const wallets = storage.listWalletsPublic();
     const w = wallets.find(x => x.id === id);
     if (!w || !w.xpub) throw new Error('Wallet HD no encontrada');
 
-    const resolved = await resolveHdWalletAddresses(w);
+    let resolved = opciones.rapido ? direccionesConocidas(w) : await resolveHdWalletAddresses(w);
+    let rebarrida = false;
 
     let confirmed = 0;
     let unconfirmed = 0;
     let details = [];
     let failures = 0;
 
-    const results = await Promise.all(resolved.allAddresses.map(async (a) => {
-      try {
-        const b = await network.getBalance(a.address);
-        if (b.confirmed > 0 || b.unconfirmed !== 0) {
-          details.push({ ...a, confirmed: b.confirmed, unconfirmed: b.unconfirmed });
+    const consultarSaldos = async (direcciones) => {
+      confirmed = 0; unconfirmed = 0; details = []; failures = 0;
+      return Promise.all(direcciones.map(async (a) => {
+        try {
+          const b = await network.getBalance(a.address);
+          if (b.confirmed > 0 || b.unconfirmed !== 0) {
+            details.push({ ...a, confirmed: b.confirmed, unconfirmed: b.unconfirmed });
+          }
+          return b;
+        } catch (err) {
+          failures += 1;
+          return { confirmed: 0, unconfirmed: 0 };
         }
-        return b;
-      } catch (err) {
-        failures += 1;
-        return { confirmed: 0, unconfirmed: 0 };
+      }));
+    };
+
+    let results = await consultarSaldos(resolved.allAddresses);
+
+    // En modo rapido, actividad en la ventana de cortesia significa que la
+    // wallet creció por fuera de los indices anotados. Ahi el atajo dejo de
+    // ser valido y hay que barrer en serio ESTA wallet.
+    if (opciones.rapido) {
+      const masAllaDeLoConocido = details.some(d =>
+        (d.change === 0 && d.index >= resolved.desdeReceive) ||
+        (d.change === 1 && d.index >= resolved.desdeChange)
+      );
+      if (masAllaDeLoConocido) {
+        rebarrida = true;
+        resolved = await resolveHdWalletAddresses(w);
+        results = await consultarSaldos(resolved.allAddresses);
       }
-    }));
+    }
 
     if (tooManyNetworkFailures(failures, results.length)) {
       throw new Error('Error de red: fallaron demasiadas consultas de saldo (la wallet podria tener fondos no visibles).');
@@ -474,6 +538,12 @@ function registerIpc() {
     // y el usuario veia un total incompleto como si fuera el total.
     const incomplete = failures > 0 || resolved.discoveryFailures > 0 || resolved.discoveryIncomplete;
 
+    // Un saldo del camino rapido mira solo las direcciones anotadas. Si la
+    // wallet crecio por fuera y la actividad nueva cayo mas alla de la ventana
+    // de cortesia, este total puede quedar corto — el detalle, que si barre
+    // completo, es el que manda.
+    const soloDireccionesConocidas = Boolean(opciones.rapido) && !rebarrida;
+
     return {
       confirmed,
       unconfirmed,
@@ -486,6 +556,8 @@ function registerIpc() {
       discoveryFailures: resolved.discoveryFailures,
       discoveryIncomplete: resolved.discoveryIncomplete,
       addressesQueried: results.length,
+      soloDireccionesConocidas,
+      rebarrida,
     };
   });
 
