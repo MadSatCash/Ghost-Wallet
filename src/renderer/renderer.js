@@ -635,6 +635,7 @@ $('#btn-import').addEventListener('click', async function() {
       var r = await window.api.hexHdReport(val, 5);
       out.innerHTML = '';
       out.appendChild(balanceHead(r.total.confirmed, r.total.unconfirmed));
+      appendIncompleteWarnings(out, r);
       var titleEl = document.createElement('p');
       titleEl.className = 'subtitle';
       titleEl.textContent = t('first_addresses');
@@ -664,6 +665,7 @@ $('#btn-import').addEventListener('click', async function() {
     var r = await window.api.mnemonicReport(val, 5);
     out.innerHTML = '';
     out.appendChild(balanceHead(r.total.confirmed, r.total.unconfirmed));
+    appendIncompleteWarnings(out, r);
     var titleEl = document.createElement('p');
     titleEl.className = 'subtitle';
     titleEl.textContent = t('first_addresses');
@@ -755,16 +757,42 @@ function buildChainNote(estadoCadena) {
 // Va con el detalle textual, no con un icono a secas: si la wallet dice
 // "cuidado" tiene que decir tambien que vio y quien discrepa.
 function buildVerificationWarning(verification) {
+  return buildWarning(t('verify_unverified_title'), verification.detail || '');
+}
+
+// Aviso de dato incompleto. Distinto del de arriba: alla los servidores
+// contestaron y no coincidieron; aca directamente no contestaron, y lo que se
+// muestra es lo que se pudo juntar. Sin este cartel, un saldo al que le faltan
+// direcciones se lee igual que uno completo.
+function buildWarning(titulo, detalle) {
   var el = document.createElement('div');
   el.className = 'verify-warning';
-  var titulo = document.createElement('strong');
-  titulo.textContent = t('verify_unverified_title');
-  var detalle = document.createElement('div');
-  detalle.className = 'verify-warning-detail';
-  detalle.textContent = verification.detail || '';
-  el.appendChild(titulo);
-  el.appendChild(detalle);
+  var head = document.createElement('strong');
+  head.textContent = titulo;
+  var body = document.createElement('div');
+  body.className = 'verify-warning-detail';
+  body.textContent = detalle;
+  el.appendChild(head);
+  el.appendChild(body);
   return el;
+}
+
+// Cuelga los avisos de "esto que ves puede no ser todo" en cualquier pantalla
+// que muestre un saldo. Va en un solo lugar porque la regla es la misma en las
+// tres: un total al que le faltan direcciones se lee igual que uno completo si
+// nadie lo dice.
+function appendIncompleteWarnings(container, r) {
+  if (r.failures > 0) {
+    container.appendChild(buildWarning(
+      t('incomplete_balance_title'),
+      t('incomplete_balance_detail', { failures: r.failures, total: r.addressesQueried })
+    ));
+  }
+  if (r.discoveryFailures > 0 || r.discoveryIncomplete) {
+    container.appendChild(buildWarning(
+      t('incomplete_balance_title'), t('incomplete_balance_scan')
+    ));
+  }
 }
 
 // =========================== PERSISTENCIA Y DETALLES ===========================
@@ -927,6 +955,8 @@ async function showWalletDetails(id) {
     if (b.verification && !b.verification.verified) {
       balContainer.appendChild(buildVerificationWarning(b.verification));
     }
+    // El saldo puede ser un piso y no un total: decirlo.
+    appendIncompleteWarnings(balContainer, b);
   } catch (err) {
     currentWalletBalanceSats = 0;
     balContainer.innerHTML = '<div class="error">' + t('balance_network_error', { error: escapeHtml(err.message || String(err)) }) + '</div>';
@@ -1094,6 +1124,22 @@ $('#btn-go-history').addEventListener('click', async function() {
     if (historyResult.verification && !historyResult.verification.verified) {
       container.appendChild(buildVerificationWarning(historyResult.verification));
     }
+    // Una lista con agujeros que no se anuncian se lee como una lista completa.
+    if (historyResult.historyFailures > 0) {
+      container.appendChild(buildWarning(
+        t('incomplete_history_title'),
+        t('incomplete_history_detail', {
+          failures: historyResult.historyFailures,
+          total: historyResult.addressesQueried,
+        })
+      ));
+    }
+    if (historyResult.txSinResolver > 0) {
+      container.appendChild(buildWarning(
+        t('incomplete_history_title'),
+        t('incomplete_history_tx', { count: historyResult.txSinResolver })
+      ));
+    }
     if (historyResult.chain) {
       container.appendChild(buildChainNote(historyResult.chain));
     }
@@ -1112,6 +1158,14 @@ $('#btn-go-history').addEventListener('click', async function() {
 
       var date = new Date(tx.time * 1000).toLocaleString();
       var statusText = tx.height <= 0 ? ' ' + t('unconfirmed_label') : '';
+      // Sin poder resolver todos los inputs, el signo puede estar invertido:
+      // una tx enviada se calcula como recibida. Mejor decir "no se pudo
+      // calcular" que mostrar un numero con el signo al reves.
+      if (tx.amountUncertain) {
+        sign = '?';
+        color = 'var(--muted)';
+        bg = 'rgba(136,136,160,0.12)';
+      }
       var fiat = fmtFiat(Math.abs(tx.netSats)) || currentFiatPlaceholder();
       ensurePriceLoaded({ silent: true }).then(updateAllFiatDisplays);
 
@@ -1128,7 +1182,7 @@ $('#btn-go-history').addEventListener('click', async function() {
       div.innerHTML =
         '<div style="flex: 1; overflow: hidden; margin-right: 15px;">' +
           '<div style="font-size: 14px; font-weight: 600; margin-bottom: 4px;">' +
-            (isPositive ? t('received') : t('sent')) +
+            (tx.amountUncertain ? t('amount_uncertain') : (isPositive ? t('received') : t('sent'))) +
             ' <span style="color: var(--muted); font-weight: normal; font-size: 12px; margin-left: 6px;">' + date + statusText + '</span>' +
             spvBadge(tx.verification) +
           '</div>' +

@@ -11,6 +11,7 @@ const chain = require('../core/chain');
 const chainsync = require('../core/chainsync');
 const spv = require('../core/spv');
 const coinselect = require('../core/coinselect');
+const utxoscan = require('../core/utxoscan');
 const torManager = require('./torManager');
 
 const isHdWallet = (w) => Boolean(w && (w.type === 'mnemonic' || w.type === 'hex_hd'));
@@ -137,6 +138,7 @@ async function discoverHdChain(xpub, branch, startFrom = 0) {
   let consecutiveEmpty = 0;
   let maxIndexWithActivity = -1;
   let stopWalking = false;
+  let failures = 0;
 
   while (!stopWalking && discovered.length < DISCOVERY_HARD_CAP) {
     const batch = wallet.getAddressesFromXPub(xpub, branch, cursor, DISCOVERY_BATCH_SIZE);
@@ -146,23 +148,36 @@ async function discoverHdChain(xpub, branch, startFrom = 0) {
         const h = await network.getHistory(a.address);
         return { address: a, historyLength: Array.isArray(h) ? h.length : 0, ok: true };
       } catch (e) {
-        return { address: a, historyLength: 0, ok: false };
+        // El motivo importa y hasta ahora se tiraba. Sin esto, un barrido que
+        // falla no se puede diagnosticar despues: solo queda el sintoma.
+        return { address: a, historyLength: 0, ok: false, error: e };
       }
     }));
 
     // Si MAYORIA del batch fallo, la red esta caida/inestable: abortar en
     // vez de arriesgar a que un gap "empty" en realidad sean fallos y demos
     // saldo 0 falso a una wallet que tiene fondos.
-    const batchFailures = results.filter(r => !r.ok).length;
-    if (tooManyNetworkFailures(batchFailures, results.length)) {
-      throw new Error('No se pudo consultar la red durante el descubrimiento de direcciones (demasiados fallos en el lote).');
+    const fallidos = results.filter(r => !r.ok);
+    if (tooManyNetworkFailures(fallidos.length, results.length)) {
+      const motivo = fallidos[0].error ? fallidos[0].error.message : 'sin detalle';
+      const cola = network.estadoDeCola();
+      throw new Error(
+        `No se pudo consultar la red durante el descubrimiento de direcciones ` +
+        `(${fallidos.length} de ${results.length} fallaron; cola: ${cola.enVuelo} en vuelo, ${cola.esperando} esperando). ` +
+        `Primer motivo: ${motivo}`
+      );
     }
 
     for (const r of results) {
       discovered.push(r.address);
       if (!r.ok) {
         // Fallo aislado: no lo contamos como vacio (podria haber tenido
-        // actividad); tampoco reseteamos el gap. Seguimos.
+        // actividad); tampoco reseteamos el gap. Seguimos, pero queda
+        // anotado: el gap sigue corriendo con las que vienen despues, asi
+        // que una direccion activa que no pudimos ver puede cortar el
+        // barrido antes de tiempo y esconder fondos en indices mas altos.
+        // Quien vaya a firmar tiene que enterarse de esto.
+        failures += 1;
         continue;
       }
       if (r.historyLength > 0) {
@@ -180,13 +195,14 @@ async function discoverHdChain(xpub, branch, startFrom = 0) {
     cursor += DISCOVERY_BATCH_SIZE;
   }
 
-  if (discovered.length >= DISCOVERY_HARD_CAP && !stopWalking) {
+  const hitHardCap = discovered.length >= DISCOVERY_HARD_CAP && !stopWalking;
+  if (hitHardCap) {
     // Wallet enorme (>2000 direcciones activas por rama) — no llegamos al
     // gap. El saldo reportado puede ser incompleto.
     console.warn(`[discoverHdChain] Hard cap ${DISCOVERY_HARD_CAP} alcanzado en branch ${branch}. El saldo puede estar subestimado.`);
   }
 
-  return { addresses: discovered, maxIndexWithActivity };
+  return { addresses: discovered, maxIndexWithActivity, failures, hitHardCap };
 }
 
 // Descubre direcciones de ambas ramas y persiste los indices en storage.
@@ -223,6 +239,10 @@ async function resolveHdWalletAddresses(w) {
     changeIndex: newChangeIndex,
     maxReceiveActive: receiveResult.maxIndexWithActivity,
     maxChangeActive:  changeResult.maxIndexWithActivity,
+    // Salud del barrido. Las pantallas que solo muestran pueden ignorarlo;
+    // la que firma, no.
+    discoveryFailures: receiveResult.failures + changeResult.failures,
+    discoveryIncomplete: receiveResult.hitHardCap || changeResult.hitHardCap,
   };
 }
 
@@ -448,13 +468,24 @@ function registerIpc() {
       unconfirmed += b.unconfirmed;
     }
 
+    // Mostrar es mas tolerante que firmar: un saldo parcial sigue siendo util
+    // y no se puede dejar la pantalla en blanco por un timeout. Pero parcial
+    // hay que decirlo. Antes esta cuenta se descartaba al salir de la funcion
+    // y el usuario veia un total incompleto como si fuera el total.
+    const incomplete = failures > 0 || resolved.discoveryFailures > 0 || resolved.discoveryIncomplete;
+
     return {
       confirmed,
       unconfirmed,
       details,
       receiveAddresses: resolved.receiveAddresses,
       server: network.serverName(),
-      verification: aggregateVerification(results)
+      verification: aggregateVerification(results),
+      incomplete,
+      failures,
+      discoveryFailures: resolved.discoveryFailures,
+      discoveryIncomplete: resolved.discoveryIncomplete,
+      addressesQueried: results.length,
     };
   });
 
@@ -497,6 +528,13 @@ function registerIpc() {
       firstAddresses = [...firstAddresses, ...extra];
     }
 
+    // Esta es la pantalla donde el usuario decide si la seed que escribio es la
+    // suya. Un saldo subestimado aca no se lee como "falto red": se lee como
+    // "me equivoque de wallet". Tiene que decir cuando esta incompleto.
+    const failures = rBal.failures + cBal.failures;
+    const discoveryFailures = receiveDiscovery.failures + changeDiscovery.failures;
+    const discoveryIncomplete = receiveDiscovery.hitHardCap || changeDiscovery.hitHardCap;
+
     return {
       addresses: firstAddresses,
       total: {
@@ -505,6 +543,11 @@ function registerIpc() {
       },
       server: network.serverName(),
       verification: aggregateVerification([rBal, cBal]),
+      incomplete: failures > 0 || discoveryFailures > 0 || discoveryIncomplete,
+      failures,
+      discoveryFailures,
+      discoveryIncomplete,
+      addressesQueried: receiveDiscovery.addresses.length + changeDiscovery.addresses.length,
     };
   }
 
@@ -520,7 +563,8 @@ function registerIpc() {
 
   // Junta los UTXOs gastables de una wallet. Para wallets HD tambien devuelve
   // el resultado del discovery, que el envio necesita para la direccion de
-  // cambio. Aborta si fallo demasiada red: mejor un error que una tx incompleta.
+  // cambio. La regla —o estan todas las direcciones, o no se firma— vive en
+  // utxoscan.js, donde se puede testear sin red.
   async function collectSpendableUtxos(w) {
     if (!isHdWallet(w)) {
       const u = await network.getUtxos(w.address);
@@ -528,34 +572,13 @@ function registerIpc() {
     }
 
     const resolved = await resolveHdWalletAddresses(w);
-    const utxos = [];
-    let failures = 0;
-    const disputadas = [];
+    const { utxos } = await utxoscan.collectSpendableUtxos({
+      addresses: resolved.allAddresses,
+      getUtxos: (address) => network.getUtxos(address),
+      discoveryFailures: resolved.discoveryFailures,
+      discoveryIncomplete: resolved.discoveryIncomplete,
+    });
 
-    await Promise.all(resolved.allAddresses.map(async (a) => {
-      try {
-        const u = await network.getUtxos(a.address);
-        if (u && u.length > 0) {
-          u.forEach(x => utxos.push({ ...x, address: a.address, change: a.change, index: a.index }));
-        }
-      } catch (e) {
-        // Discrepancia entre operadores != timeout. La primera no se arregla
-        // reintentando y el usuario tiene que verla; la segunda si.
-        if (e && e.consensusFailure) disputadas.push({ address: a.address, detail: e.message });
-        else failures++;
-      }
-    }));
-
-    if (disputadas.length > 0) {
-      throw new Error(
-        'Los servidores no coinciden sobre los fondos de esta wallet, asi que no se firma nada.\n\n' +
-        disputadas.map(d => '· ' + d.detail).join('\n\n')
-      );
-    }
-
-    if (tooManyNetworkFailures(failures, resolved.allAddresses.length)) {
-      throw new Error('Error de red: fallaron demasiadas consultas de UTXOs. Reintenta antes de enviar para no dejar fondos afuera de la transaccion.');
-    }
     return { utxos, resolved };
   }
 
@@ -715,6 +738,11 @@ function registerIpc() {
     let historyMap = new Map();
     const verificaciones = [];
 
+    // Direcciones cuyo historial no se pudo traer. Sus transacciones no van a
+    // aparecer en la lista, y un historial con agujeros que no se anuncian es
+    // peor que uno que avisa: el usuario concluye que una tx no existe.
+    let historyFailures = 0;
+
     const histPromises = allAddrs.map(async (addr) => {
       try {
         const { entries, verification } = await network.getHistoryVerified(addr);
@@ -724,7 +752,9 @@ function registerIpc() {
             historyMap.set(tx.tx_hash, tx);
           }
         });
-      } catch (err) {}
+      } catch (err) {
+        historyFailures += 1;
+      }
     });
     await Promise.all(histPromises);
 
@@ -738,6 +768,8 @@ function registerIpc() {
     history = history.slice(0, 50);
 
     const detailedHistory = [];
+    // Transacciones que no se pudieron traer: no aparecen en la lista.
+    let txSinResolver = 0;
     const CHUNK = 10;
     for (let i = 0; i < history.length; i += CHUNK) {
       const chunk = history.slice(i, i + CHUNK);
@@ -745,7 +777,7 @@ function registerIpc() {
         try {
           const raw = await network.getTransaction(tx.tx_hash);
           let netSats = 0;
-          
+
           raw.vout.forEach(out => {
             if (out.scriptPubKey && out.scriptPubKey.addresses) {
               for (const a of out.scriptPubKey.addresses) {
@@ -756,6 +788,12 @@ function registerIpc() {
             }
           });
 
+          // El neto de una tx es lo que entro a mis direcciones menos lo que
+          // salio de ellas. La resta necesita la tx anterior de cada input, y
+          // si esa consulta falla el input no se resta: una tx en la que MANDE
+          // plata queda con neto positivo y se muestra como si hubiera cobrado.
+          // Ese numero no se puede mostrar como si fuera un hecho.
+          let vinsSinResolver = 0;
           const vinPromises = raw.vin.map(async (vin) => {
             if (vin.coinbase) return;
             try {
@@ -768,19 +806,27 @@ function registerIpc() {
                   }
                 }
               }
-            } catch(e) {}
+            } catch (e) {
+              vinsSinResolver += 1;
+            }
           });
           await Promise.all(vinPromises);
 
-          if (netSats !== 0) {
+          // Con inputs sin resolver, un neto 0 tampoco significa "no me toca":
+          // puede ser una tx mia cuyo signo no se pudo calcular. Se muestra
+          // igual, marcada, en vez de desaparecer de la lista.
+          if (netSats !== 0 || vinsSinResolver > 0) {
             detailedHistory.push({
               txid: tx.tx_hash,
               height: tx.height,
               netSats,
+              amountUncertain: vinsSinResolver > 0,
               time: raw.blocktime || raw.time || Math.floor(Date.now() / 1000)
             });
           }
-        } catch(e) {}
+        } catch (e) {
+          txSinResolver += 1;
+        }
       });
       await Promise.all(chunkPromises);
     }
@@ -798,6 +844,10 @@ function registerIpc() {
       transactions: detailedHistory,
       verification: aggregateVerification(verificaciones),
       chain: chainsync.estado(),
+      incomplete: historyFailures > 0 || txSinResolver > 0,
+      historyFailures,
+      txSinResolver,
+      addressesQueried: allAddrs.length,
     };
   });
 }

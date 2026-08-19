@@ -10,10 +10,26 @@ const consensus = require('../src/core/consensus');
 const chain = require('../src/core/chain');
 const spv = require('../src/core/spv');
 const coinselect = require('../src/core/coinselect');
+const utxoscan = require('../src/core/utxoscan');
 
 let passed = 0;
 function ok(name, cond) {
   assert.ok(cond, 'FALLO: ' + name);
+  console.log('  OK  ' + name);
+  passed++;
+}
+
+// Para las reglas que se cumplen NO devolviendo nada: comprueba que lanza, y
+// que el mensaje dice por que. Un throw con el texto equivocado no sirve de
+// nada cuando lo que hay que decidir es si reintentar o llamar al soporte.
+async function lanza(name, fn, fragmentoEsperado) {
+  let error = null;
+  try { await fn(); } catch (e) { error = e; }
+  assert.ok(error, `FALLO: ${name}\n   esperado: que lanzara\n   obtenido: devolvio sin error`);
+  if (fragmentoEsperado) {
+    assert.ok(error.message.includes(fragmentoEsperado),
+      `FALLO: ${name}\n   el mensaje no menciona "${fragmentoEsperado}"\n   mensaje: ${error.message}`);
+  }
   console.log('  OK  ' + name);
   passed++;
 }
@@ -730,6 +746,107 @@ async function main() {
     eq('entradas = salidas + comision', plan.totalIn, salidas + firmada.feeSats);
     ok('la direccion no gastada sigue intacta',
       !plan.inputs.some(u => u.address === hexHdAddresses[1].address));
+  }
+
+  {
+    console.log('\n== Barrido de UTXOs: "no se" no es "no hay" ==');
+    // Regresion de un bug que llego a produccion en v0.10.0: la wallet decia
+    // "No hay fondos suficientes (0 UTXOs)" con la plata intacta en la cadena.
+    // El barrido toleraba fallos mientras no pasaran la mitad; con 75
+    // direcciones y una sola con fondos, el timeout de esa unica direccion
+    // contaba 1 de 75 y la lista salia vacia como si fuera un hecho.
+
+    // Wallet realista: 75 direcciones, la del indice 0 tiene toda la plata.
+    const direcciones = [];
+    for (let i = 0; i < 30; i++) direcciones.push({ address: 'addr-r-' + i, change: 0, index: i });
+    for (let i = 0; i < 45; i++) direcciones.push({ address: 'addr-c-' + i, change: 1, index: i });
+    const CON_FONDOS = 'addr-r-0';
+    const utxoDeLaPlata = { tx_hash: 'cc'.repeat(32), tx_pos: 0, value: 391493 };
+
+    const todasResponden = async (address) => (address === CON_FONDOS ? [utxoDeLaPlata] : []);
+
+    const { utxos } = await utxoscan.collectSpendableUtxos({
+      addresses: direcciones, getUtxos: todasResponden,
+    });
+    eq('con todas las respuestas, encuentra la plata', utxos.length, 1);
+    eq('y la ubica en su direccion', utxos[0].address, CON_FONDOS);
+    eq('conservando el indice, que el envio necesita', utxos[0].index, 0);
+
+    // El bug exacto: falla SOLO la direccion que tiene los fondos.
+    let consultas = 0;
+    const fallaLaQueImporta = async (address) => {
+      consultas++;
+      if (address === CON_FONDOS) throw new Error('socket hang up');
+      return [];
+    };
+    await lanza(
+      'un fallo aislado en la unica direccion con fondos NO se reporta como wallet vacia',
+      () => utxoscan.collectSpendableUtxos({ addresses: direcciones, getUtxos: fallaLaQueImporta }),
+      'no se firma nada'
+    );
+    ok('y antes de rendirse reintenta', consultas > direcciones.length);
+
+    await lanza(
+      'el error dice cuantas direcciones quedaron sin respuesta',
+      () => utxoscan.collectSpendableUtxos({ addresses: direcciones, getUtxos: fallaLaQueImporta }),
+      '1 de 75 direcciones'
+    );
+
+    // Un timeout suelto sí se arregla reintentando: no puede abortar el envio.
+    let intentosDeLaQueFalla = 0;
+    const fallaUnaVezYSeRecupera = async (address) => {
+      if (address === CON_FONDOS) {
+        intentosDeLaQueFalla++;
+        if (intentosDeLaQueFalla === 1) throw new Error('timeout');
+        return [utxoDeLaPlata];
+      }
+      return [];
+    };
+    const recuperado = await utxoscan.collectSpendableUtxos({
+      addresses: direcciones, getUtxos: fallaUnaVezYSeRecupera,
+    });
+    eq('un fallo transitorio se resuelve reintentando', recuperado.utxos.length, 1);
+    eq('y solo se reintenta lo que fallo', intentosDeLaQueFalla, 2);
+
+    // Una discrepancia entre operadores no mejora reintentando: hay que verla.
+    let vecesConsultadaLaDisputada = 0;
+    const discrepan = async (address) => {
+      if (address !== CON_FONDOS) return [];
+      vecesConsultadaLaDisputada++;
+      const e = new Error('imaginary.cash dice 391493 y loping.net dice 0');
+      e.consensusFailure = true;
+      throw e;
+    };
+    await lanza(
+      'una discrepancia entre servidores frena la firma',
+      () => utxoscan.collectSpendableUtxos({ addresses: direcciones, getUtxos: discrepan }),
+      'no coinciden'
+    );
+    eq('y no se reintenta, porque no se arregla sola', vecesConsultadaLaDisputada, 1);
+
+    // El barrido decide QUE direcciones se consultan. Si quedo corto, la lista
+    // puede estar impecable sobre el universo equivocado.
+    await lanza(
+      'si la busqueda de direcciones fallo, no se firma aunque los UTXOs respondan',
+      () => utxoscan.collectSpendableUtxos({
+        addresses: direcciones, getUtxos: todasResponden, discoveryFailures: 1,
+      }),
+      'No se firma nada'
+    );
+    await lanza(
+      'si la busqueda se corto por tope, tampoco',
+      () => utxoscan.collectSpendableUtxos({
+        addresses: direcciones, getUtxos: todasResponden, discoveryIncomplete: true,
+      }),
+      'No se firma nada'
+    );
+
+    // Una wallet de verdad vacia tiene que poder decirlo sin lanzar: el error
+    // es para "no pude fijarme", no para "me fije y no hay".
+    const vacia = await utxoscan.collectSpendableUtxos({
+      addresses: direcciones, getUtxos: async () => [],
+    });
+    eq('una wallet realmente vacia devuelve cero sin lanzar', vacia.utxos.length, 0);
   }
 
   console.log(`\nTODO OK (${passed} comprobaciones)\n`);

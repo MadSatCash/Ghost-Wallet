@@ -263,16 +263,71 @@ async function getClient() {
 // Le hace la misma pregunta a todos los operadores del pool.
 // Los que fallan se descartan en silencio: el veredicto ya distingue entre
 // "coinciden" y "respondieron pocos".
+// Tope de consultas de wallet en vuelo al mismo tiempo.
+//
+// Por que hace falta: la pantalla principal pide el saldo de TODAS las wallets
+// guardadas de una vez, y cada saldo son ~75 direcciones (descubrimiento mas
+// saldo). Con 26 wallets HD eso son ~11.700 requests disparados de golpe sobre
+// tres circuitos Tor. El canal se tapa solo y las consultas empiezan a vencer
+// en masa; lo que llegue despues —por ejemplo la consulta de UTXOs de un
+// envio— compite contra esa avalancha y vence tambien. Asi se llego a mostrar
+// "No hay fondos suficientes (0 UTXOs)" con la plata intacta en la cadena.
+//
+// El numero sale de la misma medicion que ordena la descarga de cabeceras: un
+// circuito Tor rinde hasta cierto punto y, pasadas PIPELINE_DEPTH requests
+// encoladas por conexion, la ganancia se aplana. Cada queryAll manda UNA
+// request a cada operador, asi que PIPELINE_DEPTH consultas en vuelo dejan
+// exactamente esa profundidad en cada conexion.
+//
+// Esto no hace mas lenta la carga: el techo lo pone Tor, no la cola. Lo que
+// cambia es que la espera se hace ordenada en vez de terminar en timeouts.
+const MAX_CONSULTAS_EN_VUELO = PIPELINE_DEPTH;
+
+// Una cola sola no alcanza: pintar la lista de wallets encola cientos de
+// consultas, y un envio que llega despues quedaria esperando atras de todas
+// ellas. Lo urgente —lo que hace falta para firmar— pasa adelante. Lo que
+// alimenta una pantalla puede esperar.
+let consultasEnVuelo = 0;
+const esperandoCupo = [];
+
+async function conCupo(fn, { urgente = false } = {}) {
+  if (consultasEnVuelo >= MAX_CONSULTAS_EN_VUELO) {
+    await new Promise(resolve => {
+      if (urgente) esperandoCupo.unshift(resolve);
+      else esperandoCupo.push(resolve);
+    });
+  }
+  consultasEnVuelo++;
+  try {
+    return await fn();
+  } finally {
+    consultasEnVuelo--;
+    const siguiente = esperandoCupo.shift();
+    if (siguiente) siguiente();
+  }
+}
+
+// Cuantas consultas hay en vuelo y cuantas esperando. Para diagnostico.
+function estadoDeCola() {
+  return { enVuelo: consultasEnVuelo, esperando: esperandoCupo.length, tope: MAX_CONSULTAS_EN_VUELO };
+}
+
 async function queryAll(method, ...params) {
+  return queryAllCon({}, method, ...params);
+}
+
+async function queryAllCon(opciones, method, ...params) {
   const pool = await getPool();
-  const respuestas = await Promise.allSettled(
-    pool.map(async (entry) => {
-      const res = await entry.client.request(method, ...params);
-      if (res instanceof Error) throw res;
-      return { operator: entry.operator, host: entry.host, height: entry.height, value: res };
-    })
-  );
-  return respuestas.filter(r => r.status === 'fulfilled').map(r => r.value);
+  return conCupo(async () => {
+    const respuestas = await Promise.allSettled(
+      pool.map(async (entry) => {
+        const res = await entry.client.request(method, ...params);
+        if (res instanceof Error) throw res;
+        return { operator: entry.operator, host: entry.host, height: entry.height, value: res };
+      })
+    );
+    return respuestas.filter(r => r.status === 'fulfilled').map(r => r.value);
+  }, opciones);
 }
 
 // Consulta con consenso y un reintento.
@@ -281,11 +336,11 @@ async function queryAll(method, ...params) {
 // servidores pueden discrepar un instante porque uno ya proceso el bloque nuevo
 // y el otro no. Esperar un momento y volver a preguntar los pone de acuerdo.
 // Si la diferencia sobrevive al reintento, ya no es desfase.
-async function queryWithConsensus(method, params, resolver) {
-  let verdict = resolver(await queryAll(method, ...params));
+async function queryWithConsensus(method, params, resolver, opciones = {}) {
+  let verdict = resolver(await queryAllCon(opciones, method, ...params));
   if (!verdict.verified && verdict.reason === 'discrepancia') {
     await new Promise(resolve => setTimeout(resolve, 1500));
-    verdict = resolver(await queryAll(method, ...params));
+    verdict = resolver(await queryAllCon(opciones, method, ...params));
   }
   return verdict;
 }
@@ -334,8 +389,11 @@ async function getBalance(address) {
 // error explicito es mejor que una transaccion armada sobre datos en disputa.
 async function getUtxos(address) {
   const sh = await addressToScripthash(address);
+  // Urgente: esto es lo que se consulta para firmar. Si espera atras de la
+  // tanda de saldos que pinta la pantalla principal, vence, y un envio
+  // perfectamente valido termina en "no hay fondos".
   const verdict = await queryWithConsensus(
-    'blockchain.scripthash.listunspent', [sh], consensus.resolveUtxos
+    'blockchain.scripthash.listunspent', [sh], consensus.resolveUtxos, { urgente: true }
   );
 
   if (!verdict.verified) {
@@ -898,6 +956,7 @@ module.exports = {
   formatBch,
   serverName,
   poolStatus,
+  estadoDeCola,
   disconnect,
   getHistory,
   getHistoryVerified,
