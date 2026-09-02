@@ -212,6 +212,31 @@ function getPrivateKeyHexForHexHdPath(secret, account = 0, change = 0, index = 0
   return child.privateKey.toString();
 }
 
+// Prefijos base58 legacy de BCH mainnet (los de Satoshi: 1... y 3...).
+//
+// bitcore-lib-cash usa para "livenet" el formato base58 propio de BitPay
+// (0x1c / 0x28, direcciones C... y H...) y rechaza estos con un error de red
+// equivocado, como si fueran de testnet. Pero 1... y 3... son EL formato que
+// muestran los exchanges (Binance, entre otros) para depositar BCH, asi que
+// hay que aceptarlos: son la misma clave publica que un cashaddr q.../p...,
+// solo que escrita distinto.
+const LEGACY_MAINNET_VERSIONS = { 0x00: 'pubkeyhash', 0x05: 'scripthash' };
+
+// Devuelve la Address de una base58 legacy de mainnet, o null si el texto no
+// es eso (cashaddr, formato BitPay, otra red o basura: lo resuelve bitcore).
+function legacyMainnetAddress(bitcore, s) {
+  let buf;
+  try {
+    buf = bitcore.encoding.Base58Check.decode(s);
+  } catch {
+    return null;
+  }
+  if (buf.length !== 21) return null;
+  const tipo = LEGACY_MAINNET_VERSIONS[buf[0]];
+  if (!tipo) return null;
+  return new bitcore.Address(buf.slice(1), 'livenet', tipo);
+}
+
 // Valida que una direccion sea de BCH mainnet y devuelve el objeto Address.
 //
 // Sin esto, bitcore acepta una direccion de testnet y produce una transaccion
@@ -221,6 +246,14 @@ function parseMainnetAddress(input, etiqueta = 'La direccion de destino') {
   const bitcore = require('bitcore-lib-cash');
   const s = String(input == null ? '' : input).trim();
   if (!s) throw new Error(etiqueta + ' esta vacia.');
+
+  const legacy = legacyMainnetAddress(bitcore, s);
+  if (legacy) return legacy;
+
+  // bech32 de Bitcoin: no existe en BCH y mandar ahi quema los fondos.
+  if (/^bc1[02-9ac-hj-np-z]+$/i.test(s)) {
+    throw new Error(etiqueta + ' es de Bitcoin (BTC), no de Bitcoin Cash.');
+  }
 
   let addr;
   try {
@@ -236,6 +269,16 @@ function parseMainnetAddress(input, etiqueta = 'La direccion de destino') {
     throw new Error(etiqueta + ' no es de Bitcoin Cash mainnet.');
   }
   return addr;
+}
+
+// Si la direccion vino escrita en base58 legacy, devuelve su equivalente
+// cashaddr; si no, null. La pantalla de confirmacion lo muestra para que se
+// vea como quedo interpretada: una 1... tambien puede ser de Bitcoin, y ahi
+// la plata se quema.
+function legacyAsCashaddr(input) {
+  const bitcore = require('bitcore-lib-cash');
+  const addr = legacyMainnetAddress(bitcore, String(input == null ? '' : input).trim());
+  return addr ? addr.toString() : null;
 }
 
 function isValidMainnetAddress(input) {
@@ -387,4 +430,5 @@ module.exports = {
   bchToSats,
   parseMainnetAddress,
   isValidMainnetAddress,
+  legacyAsCashaddr,
 };

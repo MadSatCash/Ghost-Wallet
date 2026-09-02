@@ -1869,6 +1869,12 @@ $('#btn-confirm-send').addEventListener('click', async function() {
       escapeHtml(t('review_dust_skipped', { count: plan.skippedCount, sats: plan.skippedSats })) +
       '</div>';
   }
+  // Una direccion 1.../3... no dice de que red es: la misma sirve en BCH y en
+  // Bitcoin. Mostramos como la leimos para que el usuario confirme la red.
+  if (plan.legacyCashaddr) {
+    avisos += '<div class="tx-review-note">' +
+      escapeHtml(t('review_legacy_warning', { address: plan.legacyCashaddr })) + '</div>';
+  }
 
   var confirmado = await showConfirm({
     title: t('confirm_send_title'),

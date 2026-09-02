@@ -178,6 +178,33 @@ async function main() {
   tira('rechaza monto por debajo de dust', () => enviar({ amountSats: 100 }), /dust/);
   tira('rechaza sin UTXOs', () => enviar({ inputs: [] }), /UTXOs/);
 
+  console.log('\n== Direcciones legacy (1... y 3...), las que dan los exchanges ==');
+  // Vectores del spec de cashaddr: la misma clave escrita en los dos formatos.
+  // bitcore-lib-cash usa el base58 de BitPay y rechaza estas por su cuenta.
+  const LEGACY = [
+    ['1BpEi6DfDAUFd7GtittLSdBeYJvcoaVggu', 'bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a'],
+    ['1KXrWXciRDZUpQwQmuM1DbwsKDLYAYsVLR', 'bitcoincash:qr95sy3j9xwd2ap32xkykttr4cvcu7as4y0qverfuy'],
+    ['3CWFddi6m4ndiGyKqzYvsFYagqDLPVMTzC', 'bitcoincash:ppm2qsznhks23z7629mms6s4cwef74vcwvn0h829pq']
+  ];
+  for (const [legacy, cashaddr] of LEGACY) {
+    eq('legacy ' + legacy.slice(0, 10) + '... equivale a su cashaddr',
+      w.parseMainnetAddress(legacy).toString(), cashaddr);
+  }
+  ok('una legacy es destino valido', w.isValidMainnetAddress(LEGACY[0][0]));
+
+  // Lo que importa no es que valide, sino que la salida firmada sea identica
+  // a la que se firma pegando el cashaddr: mismo hash, misma plata.
+  const salidaDe = (dir) => new bitcore.Transaction(enviar({ toAddress: dir }).hex).outputs[0];
+  eq('legacy y cashaddr firman la misma salida',
+    salidaDe(LEGACY[0][0]).script.toHex(), salidaDe(LEGACY[0][1]).script.toHex());
+  ok('la salida de una legacy 1... es P2PKH', salidaDe(LEGACY[0][0]).script.isPublicKeyHashOut());
+  ok('la salida de una legacy 3... es P2SH', salidaDe(LEGACY[2][0]).script.isScriptHashOut());
+
+  tira('rechaza una legacy con el checksum roto',
+    () => enviar({ toAddress: '1DWCRGp68HQgRG1s7a6fuBtVy3CMubj4DX' }), /no es valida/);
+  tira('rechaza una bech32 de Bitcoin',
+    () => enviar({ toAddress: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4' }), /Bitcoin \(BTC\)/);
+
   console.log('\n== Conversion BCH -> satoshis (sin error de flotante) ==');
   eq('0.29 BCH', w.bchToSats('0.29'), 29000000);
   eq('0.07 BCH', w.bchToSats('0.07'), 7000000);

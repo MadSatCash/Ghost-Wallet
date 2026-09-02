@@ -809,7 +809,12 @@ function registerIpc() {
     // `inputs` se queda en el proceso principal: al frontend solo van los
     // numeros que el usuario necesita para decidir.
     const { inputs, ...plan } = wallet.planSend({ utxos, toAddress, amountSats, feeRate: 1 });
-    return { ...plan, toAddress, walletName: w.name };
+    return {
+      ...plan,
+      toAddress,
+      legacyCashaddr: wallet.legacyAsCashaddr(toAddress),
+      walletName: w.name,
+    };
   });
 
   // Enviar BCH
