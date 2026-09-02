@@ -18,10 +18,10 @@ Installers are published on the [Releases page](https://github.com/MadSatCash/Gh
 
 ```bash
 # Windows
-certutil -hashfile "Ghost Wallet Setup 0.10.0.exe" SHA256
+certutil -hashfile "Ghost.Wallet.Setup.0.11.1.exe" SHA256
 
 # Linux / macOS
-shasum -a 256 "Ghost Wallet Setup 0.10.0.exe"
+shasum -a 256 "Ghost.Wallet.Setup.0.11.1.exe"
 ```
 
 Compare the output against the `SHA256SUMS.txt` published with the release. Case does not matter: `certutil` prints lowercase, PowerShell's `Get-FileHash` prints uppercase. If it does not match character for character, do not run it.
@@ -49,6 +49,7 @@ The server list spans **7 servers across 6 independent operators**. Each read qu
 - **Tor-Only Networking (Fail-Closed):** All network traffic is routed through Tor via a local SOCKS5h proxy. If Tor is unavailable, the wallet simply does not connect — no clearnet fallback, ever.
 - **Circuit Rotation:** Force a new Tor circuit (`SIGNAL NEWNYM`) to change your network identity instantly, without restarting the app.
 - **Address-Aware Coin Selection:** Spends come from a single address whenever one covers the amount. Signing several inputs together publishes on-chain that those addresses share an owner — the oldest and most reliable chain-analysis heuristic. When more than one address is unavoidable, the wallet warns you before you sign.
+- **One Fresh Address to Receive:** The wallet detail offers a single receiving address — the first one the chain confirms has never been used — and keeps the full list folded away below it. "Never used" means the chain said so: an address that was paid and then emptied is a used address, and handing it out again ties those payments together for anyone watching. If none can be confirmed unused, the wallet says so instead of offering one.
 - **Dust Is Left Behind:** Inputs that would cost more in fee than they carry are excluded from the transaction and reported, rather than swept in.
 - **Interactive QR Codes & Privacy Overlay:** Each wallet card features a QR code with an automatic blur overlay to prevent shoulder surfing, clickable to reveal.
 
@@ -62,6 +63,7 @@ The server list spans **7 servers across 6 independent operators**. Each read qu
 ### Interface
 
 - **Wallet Groups with Per-Group Totals:** Wallets can be organised into groups. The home screen opens on the list of groups, each with its own total, and picking one swaps that column for the wallets it holds; the grand total across every wallet stays in view either way. Deleting a group never deletes the wallets inside it — they become ungrouped. Totals say so when they are partial: balances still loading, servers that did not answer, or figures that failed the cross-operator check.
+- **Unconfirmed Funds Are Spendable, and Labelled:** BCH has no RBF, so 0-conf is spendable by design rather than a bet. A UTXO counts once enough independent operators report the same outpoint and amount, whatever height each one is at — so a mempool coin does not stop being spendable the moment it is mined, just because one operator is a block behind. A discreet note under the available balance says when it includes mempool funds.
 - **Max Send & Fee Estimation:** Automatic network fee calculation and maximum spendable balance estimation before sending transactions.
 - **Satoshis & BCH Unit Formatting:** Toggle between BCH and satoshi displays with locale-aware thousands separators.
 - **Real-Time Fiat Price Display:** BCH prices are fetched through Tor (Kraken, Bitfinex, CoinGecko, Coinbase, CoinCap) with FX conversion for non-USD currencies.
@@ -163,6 +165,7 @@ node tools/make-checkpoint.mjs          # regenerate the chain.js checkpoint
 - **Strict Content-Security-Policy:** The HTML rendering layer enforces CSP rules that prohibit remote script execution and external network fetches outside the main IPC process.
 - **Navigation Guard:** Electron's main process intercepts and blocks unauthorized external URL navigation.
 - **SHA256 Binary Integrity Verification:** The downloaded Tor executable is SHA256-hashed before extraction. Any hash mismatch immediately aborts execution to prevent MITM tampering.
+- **Signing Refuses Partial Data:** Building a transaction queries every address in the wallet. If any of them still fails to answer after retries, nothing is signed. The rule it replaced aborted only past a proportion of failures, which let the single address holding the coins time out unnoticed among dozens of empty ones. For signing, "don't know" is not "there is none".
 - **Nothing Unverified Reaches Storage:** Headers are downloaded in batches and verified as a whole batch. If verification fails the batch is discarded entirely — partial "the good ones" are never kept.
 
 ### Known Issues
