@@ -18,10 +18,10 @@ Installers are published on the [Releases page](https://github.com/MadSatCash/Gh
 
 ```bash
 # Windows
-certutil -hashfile "Ghost.Wallet.Setup.0.11.1.exe" SHA256
+certutil -hashfile "Ghost.Wallet.Setup.0.11.2.exe" SHA256
 
 # Linux / macOS
-shasum -a 256 "Ghost.Wallet.Setup.0.11.1.exe"
+shasum -a 256 "Ghost.Wallet.Setup.0.11.2.exe"
 ```
 
 Compare the output against the `SHA256SUMS.txt` published with the release. Case does not matter: `certutil` prints lowercase, PowerShell's `Get-FileHash` prints uppercase. If it does not match character for character, do not run it.
