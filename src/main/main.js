@@ -1011,7 +1011,10 @@ function registerIpc() {
               height: tx.height,
               netSats,
               amountUncertain: vinsSinResolver > 0,
-              time: raw.blocktime || raw.time || Math.floor(Date.now() / 1000)
+              // Sin bloque no hay hora: la cadena registra cuando se mino, no
+              // cuando se hizo la transaccion. Rellenar con Date.now() daba una
+              // fecha que cambiaba en cada refresco y no era un dato de la tx.
+              time: raw.blocktime || raw.time || null
             });
           }
         } catch (e) {
@@ -1024,7 +1027,7 @@ function registerIpc() {
     detailedHistory.sort((a, b) => {
       if (a.height <= 0 && b.height > 0) return -1;
       if (b.height <= 0 && a.height > 0) return 1;
-      if (b.time !== a.time) return b.time - a.time;
+      if (b.time !== a.time) return (b.time || 0) - (a.time || 0);
       return 0;
     });
 

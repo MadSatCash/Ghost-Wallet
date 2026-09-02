@@ -720,13 +720,17 @@ function spvBadge(verification) {
     ok:       { bg: 'rgba(10,193,142,0.15)',  color: 'var(--bch)',        texto: t('spv_verified') },
     pendiente:{ bg: 'rgba(255,255,255,0.06)', color: 'var(--muted)',      texto: t('spv_pending') },
     fuera:    { bg: 'rgba(255,255,255,0.06)', color: 'var(--muted)',      texto: t('spv_out_of_range') },
+    esperando:{ bg: 'rgba(255,255,255,0.06)', color: 'var(--muted)',      texto: t('spv_waiting_header') },
     alerta:   { bg: 'rgba(255,107,107,0.15)', color: 'var(--warn-text)',  texto: t('spv_failed') },
   };
 
   var clave;
   if (verification.verified) clave = 'ok';
   else if (verification.reason === 'sin-confirmar') clave = 'pendiente';
-  else if (verification.reason === 'fuera-de-rango' || verification.reason === 'sin-cabecera') clave = 'fuera';
+  else if (verification.reason === 'fuera-de-rango') clave = 'fuera';
+  // Un bloque MAS NUEVO que lo sincronizado no es historico: es lo contrario.
+  // Se resuelve solo cuando la cadena de cabeceras alcanza esa altura.
+  else if (verification.reason === 'sin-cabecera') clave = 'esperando';
   else if (verification.reason === 'sin-prueba') clave = 'pendiente';
   else clave = 'alerta';
 
@@ -1686,8 +1690,13 @@ $('#btn-go-history').addEventListener('click', async function() {
       var color = isPositive ? 'var(--bch)' : 'var(--warn-text)';
       var bg = isPositive ? 'rgba(10,193,142,0.1)' : 'rgba(255,107,107,0.1)';
 
-      var date = new Date(tx.time * 1000).toLocaleString();
-      var statusText = tx.height <= 0 ? ' ' + t('unconfirmed_label') : '';
+      // La hora que existe es la del bloque, no la del envio; decirlo evita
+      // que dos transacciones del mismo bloque parezcan hechas en el mismo
+      // segundo por casualidad.
+      var date = tx.time
+        ? t('history_mined_at', { datetime: new Date(tx.time * 1000).toLocaleString() })
+        : t('unconfirmed_label');
+      var statusText = tx.height <= 0 && tx.time ? ' ' + t('unconfirmed_label') : '';
       // Sin poder resolver todos los inputs, el signo puede estar invertido:
       // una tx enviada se calcula como recibida. Mejor decir "no se pudo
       // calcular" que mostrar un numero con el signo al reves.
