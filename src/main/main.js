@@ -134,6 +134,11 @@ function aggregateVerification(balances) {
 
 async function discoverHdChain(xpub, branch, startFrom = 0) {
   const discovered = [];
+  // Veredictos del cruce entre operadores de cada historial consultado. Son
+  // evidencia de primera: "esta direccion nunca tuvo actividad" es una
+  // afirmacion sobre la cadena igual que un saldo, y quien la use para no
+  // preguntar el saldo despues tiene que poder decir con que respaldo la hizo.
+  const verifications = [];
   let cursor = startFrom;
   let consecutiveEmpty = 0;
   let maxIndexWithActivity = -1;
@@ -145,8 +150,14 @@ async function discoverHdChain(xpub, branch, startFrom = 0) {
 
     const results = await Promise.all(batch.map(async (a) => {
       try {
-        const h = await network.getHistory(a.address);
-        return { address: a, historyLength: Array.isArray(h) ? h.length : 0, ok: true };
+        const h = await network.getHistoryVerified(a.address);
+        const entries = h.entries;
+        return {
+          address: a,
+          historyLength: Array.isArray(entries) ? entries.length : 0,
+          verification: h.verification,
+          ok: true,
+        };
       } catch (e) {
         // El motivo importa y hasta ahora se tiraba. Sin esto, un barrido que
         // falla no se puede diagnosticar despues: solo queda el sintoma.
@@ -169,7 +180,22 @@ async function discoverHdChain(xpub, branch, startFrom = 0) {
     }
 
     for (const r of results) {
+      // Lo que la cadena dijo de esta direccion, anotado sobre ella. `null` es
+      // "no se pudo preguntar", que NO es lo mismo que "esta vacia": quien
+      // lea esto despues tiene que poder distinguirlos.
+      //
+      // Un cero solo se anota si el cruce entre operadores lo respalda. Es la
+      // unica respuesta que despues se usa para NO consultar el saldo, asi que
+      // es la unica que tiene que llegar con certeza: un historial vacio que
+      // nadie corroboro es un "no se", y un "no se" se pregunta. Equivocarse
+      // para el otro lado cuesta una consulta; para este, esconde plata.
+      const vaciaConRespaldo = r.ok && r.historyLength === 0 &&
+        !!(r.verification && r.verification.verified);
+      r.address.historyLength = !r.ok || (r.historyLength === 0 && !vaciaConRespaldo)
+        ? null
+        : r.historyLength;
       discovered.push(r.address);
+      if (r.ok) verifications.push({ verification: r.verification });
       if (!r.ok) {
         // Fallo aislado: no lo contamos como vacio (podria haber tenido
         // actividad); tampoco reseteamos el gap. Seguimos, pero queda
@@ -202,7 +228,7 @@ async function discoverHdChain(xpub, branch, startFrom = 0) {
     console.warn(`[discoverHdChain] Hard cap ${DISCOVERY_HARD_CAP} alcanzado en branch ${branch}. El saldo puede estar subestimado.`);
   }
 
-  return { addresses: discovered, maxIndexWithActivity, failures, hitHardCap };
+  return { addresses: discovered, maxIndexWithActivity, failures, hitHardCap, verifications };
 }
 
 // Cuantas direcciones se miran mas alla del ultimo indice conocido cuando NO
@@ -276,6 +302,9 @@ async function resolveHdWalletAddresses(w) {
     // la que firma, no.
     discoveryFailures: receiveResult.failures + changeResult.failures,
     discoveryIncomplete: receiveResult.hitHardCap || changeResult.hitHardCap,
+    // Veredictos de los historiales. Quien saltee consultas de saldo apoyandose
+    // en este barrido necesita poder mostrar con que respaldo lo hizo.
+    verifications: [...receiveResult.verifications, ...changeResult.verifications],
   };
 }
 
@@ -410,11 +439,27 @@ function registerIpc() {
     return true;
   });
 
+  // --- Contrasena maestra ---
+  //
+  // Es la unica contrasena de la app. Se pide al abrir y abre el vault entero
+  // para toda la sesion: firmar, revelar una semilla o guardar una billetera
+  // nueva ya no vuelven a pedir nada.
+  ipcMain.handle('vault:status', () => storage.estado());
+  ipcMain.handle('vault:create', (_e, password) => storage.crearVault(password));
+  ipcMain.handle('vault:unlock', (_e, password) => storage.desbloquear(password));
+
   // --- Persistencia ---
   ipcMain.handle('storage:list', () => storage.listWalletsPublic());
   ipcMain.handle('storage:save', (_e, opts) => storage.saveWallet(opts));
   ipcMain.handle('storage:delete', (_e, id) => storage.deleteWallet(id));
-  ipcMain.handle('storage:decrypt', (_e, id, password) => storage.getDecryptedSecret(id, password));
+  ipcMain.handle('storage:reveal', (_e, id) => storage.getSecret(id));
+
+  // --- Grupos de billeteras ---
+  ipcMain.handle('groups:list', () => storage.listGroups());
+  ipcMain.handle('groups:create', (_e, name) => storage.createGroup(name));
+  ipcMain.handle('groups:rename', (_e, id, name) => storage.renameGroup(id, name));
+  ipcMain.handle('groups:delete', (_e, id) => storage.deleteGroup(id));
+  ipcMain.handle('groups:assign', (_e, walletId, groupId) => storage.assignWalletGroup(walletId, groupId));
 
   ipcMain.handle('qr:generate', (_e, text) => {
     const qr = require('qrcode-generator');
@@ -490,9 +535,18 @@ function registerIpc() {
     let details = [];
     let failures = 0;
 
+    // Mismo criterio que sumBalances: se saltea solo lo que el barrido vio
+    // vacio con certeza. En el camino rapido las direcciones vienen derivadas
+    // sin historial (`undefined`), asi que ahi se consultan todas — que es el
+    // punto de ese camino: mira direcciones sin actividad conocida a proposito,
+    // buscando la que aparecio.
     const consultarSaldos = async (direcciones) => {
       confirmed = 0; unconfirmed = 0; details = []; failures = 0;
-      return Promise.all(direcciones.map(async (a) => {
+      const aConsultar = direcciones.filter(a => a.historyLength !== 0);
+      direcciones.forEach(a => {
+        if (a.historyLength === 0) { a.confirmed = 0; a.unconfirmed = 0; }
+      });
+      return Promise.all(aConsultar.map(async (a) => {
         try {
           const b = await network.getBalance(a.address);
           if (b.confirmed > 0 || b.unconfirmed !== 0) {
@@ -550,7 +604,10 @@ function registerIpc() {
       details,
       receiveAddresses: resolved.receiveAddresses,
       server: network.serverName(),
-      verification: aggregateVerification(results),
+      // Los historiales del barrido cuentan como respaldo igual que los saldos
+      // (ver hdImportReport). En el camino rapido no hubo barrido y la lista
+      // viene vacia, asi que el veredicto sale de los saldos, como antes.
+      verification: aggregateVerification([...(resolved.verifications || []), ...results]),
       incomplete,
       failures,
       discoveryFailures: resolved.discoveryFailures,
@@ -563,20 +620,47 @@ function registerIpc() {
 
   // Suma los saldos de una lista de direcciones. Anota `confirmed`/`unconfirmed`
   // sobre cada address in-place para que el caller pueda mostrarlos.
+  //
+  // No le pregunta el saldo a las direcciones que el descubrimiento ya vio sin
+  // historial: una direccion sin una sola transaccion no puede tener fondos, y
+  // esa respuesta acaba de darla la misma cadena. Eran la mitad de las
+  // consultas del import (medido en tools/probe-import.mjs: 80 -> 40 en una
+  // wallet vacia, 108 -> 68 en una con movimientos), todas por Tor, ninguna
+  // capaz de cambiar el total.
+  //
+  // El filtro se aplica SOLO sobre certeza. `historyLength` en 0 es la cadena
+  // diciendo que esta vacia; `null` (la consulta fallo) y `undefined` (nadie
+  // la descubrio, como en el camino rapido de la lista) se preguntan igual.
+  // Al no saber, se pregunta: la que se equivoca para el otro lado esconde
+  // plata.
   async function sumBalances(addresses) {
     let failures = 0;
-    const results = await Promise.all(addresses.map(async (a) => {
+    const aConsultar = addresses.filter(a => a.historyLength !== 0);
+
+    // Las salteadas se anotan en cero a mano. La UI lee estos campos y un
+    // `undefined` no se pinta como "vacia": se pinta como si nunca la
+    // hubieramos mirado.
+    addresses.forEach(a => {
+      if (a.historyLength === 0) { a.confirmed = 0; a.unconfirmed = 0; }
+    });
+
+    const results = await Promise.all(aConsultar.map(async (a) => {
       try { return await network.getBalance(a.address); }
       catch { failures++; return { confirmed: 0, unconfirmed: 0 }; }
     }));
     let confirmed = 0, unconfirmed = 0;
     results.forEach((b, i) => {
-      addresses[i].confirmed = b.confirmed;
-      addresses[i].unconfirmed = b.unconfirmed;
+      aConsultar[i].confirmed = b.confirmed;
+      aConsultar[i].unconfirmed = b.unconfirmed;
       confirmed += b.confirmed;
       unconfirmed += b.unconfirmed;
     });
-    return { confirmed, unconfirmed, failures, verification: aggregateVerification(results) };
+    // Devuelve los veredictos crudos, no el agregado: el caller tiene que
+    // poder sumarlos a los del descubrimiento. Agregar aca daria "sin datos"
+    // en una wallet vacia —donde no queda un solo saldo que consultar— y eso
+    // se veria en pantalla como una wallet sin verificar, que es al reves de
+    // lo que paso.
+    return { confirmed, unconfirmed, failures, consultadas: aConsultar.length, verifications: results };
   }
 
   // Reporte de importacion de mnemonic: gap-limit en ambas ramas para no
@@ -587,8 +671,13 @@ function registerIpc() {
       discoverHdChain(xpub, 0, 0),
       discoverHdChain(xpub, 1, 0),
     ]);
-    const rBal = await sumBalances(receiveDiscovery.addresses);
-    const cBal = await sumBalances(changeDiscovery.addresses);
+    // Las dos ramas son listas independientes: no hay motivo para que change
+    // espere a que termine receive. El tope de consultas en vuelo sigue
+    // ordenando la cola igual, esto solo deja de perder una espera entera.
+    const [rBal, cBal] = await Promise.all([
+      sumBalances(receiveDiscovery.addresses),
+      sumBalances(changeDiscovery.addresses),
+    ]);
 
     // Para la UI: primeras `count` de la rama receive. Si el discovery cubrio
     // menos que `count` (posible solo si count > GAP_LIMIT), completar con
@@ -614,12 +703,24 @@ function registerIpc() {
         unconfirmed: rBal.unconfirmed + cBal.unconfirmed,
       },
       server: network.serverName(),
-      verification: aggregateVerification([rBal, cBal]),
+      // El veredicto cubre TODO lo que se le pregunto a la red: los historiales
+      // del barrido y los saldos que se consultaron. En una wallet vacia los
+      // saldos son cero consultas y el respaldo queda entero en los
+      // historiales, que es exactamente de donde sale el "esta vacia".
+      verification: aggregateVerification([
+        ...receiveDiscovery.verifications,
+        ...changeDiscovery.verifications,
+        ...rBal.verifications,
+        ...cBal.verifications,
+      ]),
       incomplete: failures > 0 || discoveryFailures > 0 || discoveryIncomplete,
       failures,
       discoveryFailures,
       discoveryIncomplete,
-      addressesQueried: receiveDiscovery.addresses.length + changeDiscovery.addresses.length,
+      // Cuantas consultas de saldo se hicieron de verdad. Es el denominador de
+      // `failures`, que tambien son de saldo: mezclarlo con las direcciones
+      // descubiertas diluia los fallos contra un total que no les corresponde.
+      addressesQueried: rBal.consultadas + cBal.consultadas,
     };
   }
 
@@ -673,7 +774,6 @@ function registerIpc() {
       maxSats: plan.maxSats,
       utxoCount: plan.utxoCount,
       addressCount: plan.addressCount,
-      leftOut: plan.leftOut,
       skippedCount: plan.skipped.length,
       skippedSats: plan.skipped.reduce((s, u) => s + u.value, 0),
     };
@@ -700,7 +800,7 @@ function registerIpc() {
   });
 
   // Enviar BCH
-  ipcMain.handle('wallet:sendBch', async (_e, id, password, toAddress, amountBch) => {
+  ipcMain.handle('wallet:sendBch', async (_e, id, toAddress, amountBch) => {
     const wallets = storage.listWalletsPublic();
     const w = wallets.find(x => x.id === id);
     if (!w) throw new Error('Wallet no encontrada');
@@ -710,7 +810,7 @@ function registerIpc() {
     wallet.parseMainnetAddress(toAddress);
     const amountSats = wallet.bchToSats(amountBch);
 
-    const secret = storage.getDecryptedSecret(id, password);
+    const secret = storage.getSecret(id);
     const { utxos, resolved } = await collectSpendableUtxos(w);
     if (utxos.length === 0) throw new Error('No hay fondos suficientes (0 UTXOs).');
 

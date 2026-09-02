@@ -56,10 +56,12 @@ The server list spans **7 servers across 6 independent operators**. Each read qu
 
 - **Hierarchical Deterministic (HD) & Legacy Keys:** Supports BIP39 12 to 24-word seed phrases, 64-character (256-bit) HD seeds (deriving full BIP32/BIP44 `m/44'/145'/0'/0/i` trees), and single-address Legacy hex keys.
 - **Local Cryptography:** Private keys never leave your computer. All transaction signing is performed 100% offline.
-- **AES-256-GCM Storage Encryption:** Saved wallets are encrypted locally on disk using password-derived keys.
+- **Single Master Password:** One password, asked once when the app opens. It unlocks the whole vault for the session, so signing a transaction, revealing a seed or saving a new wallet never prompts again.
+- **AES-256-GCM Vault Encryption:** The entire wallet file is encrypted on disk under a key derived from the master password (PBKDF2-SHA256, 600k iterations). Names, addresses, xpubs and group names are inside the ciphertext, so a stolen file does not even reveal how many wallets it holds.
 
 ### Interface
 
+- **Wallet Groups with Per-Group Totals:** Wallets can be organised into groups. The home screen opens on the list of groups, each with its own total, and picking one swaps that column for the wallets it holds; the grand total across every wallet stays in view either way. Deleting a group never deletes the wallets inside it — they become ungrouped. Totals say so when they are partial: balances still loading, servers that did not answer, or figures that failed the cross-operator check.
 - **Max Send & Fee Estimation:** Automatic network fee calculation and maximum spendable balance estimation before sending transactions.
 - **Satoshis & BCH Unit Formatting:** Toggle between BCH and satoshi displays with locale-aware thousands separators.
 - **Real-Time Fiat Price Display:** BCH prices are fetched through Tor (Kraken, Bitfinex, CoinGecko, Coinbase, CoinCap) with FX conversion for non-USD currencies.

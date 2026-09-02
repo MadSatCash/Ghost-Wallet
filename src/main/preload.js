@@ -29,13 +29,23 @@ contextBridge.exposeInMainWorld('api', {
   torNewCircuit: () => ipcRenderer.invoke('tor:newCircuit'),
   isTorDownloaded: () => ipcRenderer.invoke('tor:isDownloaded'),
   onTorProgress: (callback) => ipcRenderer.on('tor:progress', (_event, msg) => callback(msg)),
+  // --- Contrasena maestra (la unica de la app) ---
+  vaultStatus: () => ipcRenderer.invoke('vault:status'),
+  createVault: (password) => ipcRenderer.invoke('vault:create', password),
+  unlockVault: (password) => ipcRenderer.invoke('vault:unlock', password),
   // --- Persistencia ---
   listWallets: () => ipcRenderer.invoke('storage:list'),
   saveWallet: (opts) => ipcRenderer.invoke('storage:save', opts),
   deleteWallet: (id) => ipcRenderer.invoke('storage:delete', id),
-  decryptWallet: (id, password) => ipcRenderer.invoke('storage:decrypt', id, password),
+  revealWallet: (id) => ipcRenderer.invoke('storage:reveal', id),
+  // --- Grupos de billeteras ---
+  listGroups: () => ipcRenderer.invoke('groups:list'),
+  createGroup: (name) => ipcRenderer.invoke('groups:create', name),
+  renameGroup: (id, name) => ipcRenderer.invoke('groups:rename', id, name),
+  deleteGroup: (id) => ipcRenderer.invoke('groups:delete', id),
+  assignWalletGroup: (walletId, groupId) => ipcRenderer.invoke('groups:assign', walletId, groupId),
   prepareSend: (id, toAddress, amount) => ipcRenderer.invoke('wallet:prepareSend', id, toAddress, amount),
-  sendBch: (id, password, toAddress, amount) => ipcRenderer.invoke('wallet:sendBch', id, password, toAddress, amount),
+  sendBch: (id, toAddress, amount) => ipcRenderer.invoke('wallet:sendBch', id, toAddress, amount),
   estimateMaxSend: (id) => ipcRenderer.invoke('wallet:estimateMaxSend', id),
   generateQr: (text) => ipcRenderer.invoke('qr:generate', text),
 });

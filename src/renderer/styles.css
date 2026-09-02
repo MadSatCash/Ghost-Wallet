@@ -158,6 +158,12 @@ select:focus, textarea:focus { outline: none; border-color: var(--bch); }
 }
 .mnemonic-grid .word .num { color: var(--muted); margin-right: 8px; font-size: 12px; }
 
+.copy-phrase-row {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 18px;
+}
+
 .address-box {
   margin-top: 18px;
   background: var(--panel);
@@ -235,6 +241,9 @@ code {
 .balance-label { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
 .balance-amount { font-size: 32px; font-weight: 700; color: var(--bch); }
 .balance-pending { font-size: 13px; color: var(--warn-text); margin-top: 6px; }
+/* El saldo disponible incluye lo del mempool: se avisa sin robarle atencion
+   al monto, que es lo que el usuario vino a leer. */
+.send-unconfirmed { font-size: 12px; color: var(--warn-text); font-weight: 500; margin-top: 6px; }
 .server-note { font-size: 12px; color: var(--muted); margin-top: 14px; text-align: right; }
 
 .hint { font-size: 13px; min-height: 18px; margin: -6px 0 14px; }
@@ -255,7 +264,8 @@ code {
   margin: 0 0 14px 0;
   font-weight: 600;
 }
-.save-box .field input {
+.save-box .field input,
+.save-box .field select {
   width: 100%;
   background: var(--panel-2);
   color: var(--text);
@@ -264,7 +274,8 @@ code {
   padding: 10px 12px;
   font-size: 14px;
 }
-.save-box .field input:focus {
+.save-box .field input:focus,
+.save-box .field select:focus {
   outline: none;
   border-color: var(--bch);
 }
@@ -422,27 +433,6 @@ code {
 .btn.secondary:hover {
   color: var(--text);
   border-color: var(--muted);
-}
-
-#reveal-password-field {
-  margin-top: 14px;
-}
-#reveal-password-field input {
-  width: 100%;
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 12px;
-  margin-bottom: 10px;
-}
-#reveal-password-field input:focus {
-  outline: none;
-  border-color: var(--bch);
-}
-#reveal-password-field .row {
-  display: flex;
-  gap: 10px;
 }
 
 /* --- Pantalla de Envío --- */
@@ -613,6 +603,201 @@ code {
   margin-top: 2px;
 }
 
+/* --- Grupos de billeteras --- */
+
+.grand-total {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px 20px;
+  margin-bottom: 20px;
+  text-align: center;
+}
+.grand-total-label {
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.grand-total-amount {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--bch);
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+}
+.grand-total-sub {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.grand-total-sats { font-family: 'SF Mono', 'Fira Code', Consolas, monospace; }
+
+/* Un total al que le faltan billeteras se lee igual que uno completo si nadie
+   lo dice: este es el lugar donde se dice. */
+.total-note {
+  font-size: 12px;
+  margin-top: 6px;
+  line-height: 1.4;
+}
+.total-note.muted { color: var(--muted); }
+.total-note.warn { color: var(--warn-text); }
+
+.list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.list-head h3 { margin: 0; }
+
+.btn-inline {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.btn-inline:hover { border-color: var(--bch); color: var(--bch); }
+.btn-inline.danger-inline:hover { border-color: #ff6b6b; color: #ff6b6b; }
+
+.back-inline {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 6px 0;
+}
+.back-inline:hover { color: var(--bch); }
+
+.group-head-actions { display: flex; gap: 8px; }
+
+.group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.group-head-name { margin: 0; }
+.group-head-total {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.group-head-amount {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--bch);
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+}
+.group-head-fiat { font-size: 13px; color: var(--muted); }
+
+.groups-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 24px;
+}
+.group-item {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 20px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transition: transform 0.15s, border-color 0.15s, background-color 0.15s;
+}
+.group-item:hover {
+  transform: translateY(-1px);
+  border-color: var(--bch);
+  background: var(--panel-2);
+}
+/* Las que no estan en ningun grupo: mismo formato, menos peso visual. */
+.group-item-loose { border-style: dashed; }
+.group-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.group-item-name {
+  font-weight: 600;
+  font-size: 16px;
+  color: var(--text);
+}
+.group-item-count { font-size: 12px; color: var(--muted); }
+.group-item-balance-col {
+  text-align: right;
+  flex-shrink: 0;
+  min-width: 0;
+}
+.group-item-balance {
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--bch);
+}
+.group-item-sats {
+  font-size: 12px;
+  color: var(--muted);
+  font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+  margin-top: 2px;
+}
+.group-item-fiat { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.group-item-chevron {
+  color: var(--muted);
+  font-size: 22px;
+  flex-shrink: 0;
+}
+
+.empty-note {
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  padding: 22px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.details-group-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+.details-group-label { font-size: 13px; color: var(--muted); }
+.details-group-name {
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.modal-field { margin-bottom: 0; }
+.modal-field input {
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 15px;
+  font-family: inherit;
+}
+.modal-field input:focus { outline: none; border-color: var(--bch); }
+
 /* --- Firma del Autor --- */
 .author-signature {
   position: fixed;
@@ -620,7 +805,7 @@ code {
   left: 20px;
   font-size: 12px;
   color: var(--muted);
-  z-index: 1000;
+  z-index: 500;
 }
 
 .author-signature a {
@@ -646,7 +831,7 @@ code {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  z-index: 1000;
+  z-index: 1100;
 }
 
 /* .hidden se declara antes en esta hoja y tiene la misma especificidad, asi
@@ -764,3 +949,53 @@ code {
 }
 .chain-note-ok { border-color: rgba(10, 193, 142, 0.3); color: var(--bch); }
 .chain-note-warn { border-color: rgba(255, 107, 107, 0.3); color: var(--warn-text); }
+
+/* --- Candado de arranque --- */
+/* La contrasena maestra es la unica de la app. Esta pantalla tapa la ventana
+   entera hasta que el vault se abre: si el usuario ve la lista de billeteras,
+   es porque ya autorizo la sesion. */
+
+.lock-screen {
+  position: fixed;
+  inset: 0;
+  background: var(--bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 900;
+}
+
+/* Mismo motivo que en .modal-backdrop: sin esto el display:flex pisa a .hidden. */
+.lock-screen.hidden { display: none; }
+
+.lock-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 32px 28px;
+  width: 100%;
+  max-width: 430px;
+  text-align: center;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+}
+
+.lock-logo { width: 54px; height: 54px; margin-bottom: 14px; }
+.lock-title { margin: 0 0 10px; font-size: 21px; }
+.lock-subtitle { color: var(--muted); font-size: 14px; line-height: 1.55; margin: 0 0 24px; }
+
+.lock-card .field { text-align: left; }
+.lock-card .field input {
+  width: 100%;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 11px 12px;
+  font-size: 15px;
+  font-family: inherit;
+}
+.lock-card .field input:focus { outline: none; border-color: var(--bch); }
+.lock-card .warning { text-align: left; font-size: 13px; }
+.lock-card .btn { width: 100%; }
+#lock-error { margin-top: 14px; }

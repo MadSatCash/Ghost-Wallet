@@ -208,30 +208,38 @@ async function main() {
   eq('0 BCH', net.formatBch(0), '0 BCH');
   eq('1 satoshi', net.formatBch(1), '0.00000001 BCH');
 
-  console.log('\n== Persistencia y Encriptacion (storage.js) ==');
+  console.log('\n== Vault con contrasena maestra (storage.js) ==');
   const storage = require('../src/core/storage');
   const fs = require('node:fs');
   const path = require('node:path');
 
   // Limpieza inicial por si quedo algun residuo
-  if (fs.existsSync(storage.filePath)) {
-    fs.unlinkSync(storage.filePath);
+  for (const f of [storage.filePath, storage.filePath + '.bak', storage.legacyPath]) {
+    if (fs.existsSync(f)) fs.unlinkSync(f);
   }
 
-  // 1. Empezar vacio
-  eq('lista inicial vacia', storage.listWalletsPublic().length, 0);
-
-  // 2. Guardar wallet
   const testSecret = '466d0b53493912bc2b319bcfb6803a78d417a06d95c7050f6a2fbfc88afb471c';
   const testAddr = 'bitcoincash:qrv7g523vn6jejwrndqjzdm2n0y5cg9cqsecznhr9k';
-  const testPass = 'segura123';
-  
+  const maestra = 'contrasena-maestra-123';
+
+  // 1. Sin vault creado no hay nada que listar, y pedirlo tiene que fallar
+  //    fuerte: una lista vacia se leeria como "no tenes billeteras".
+  eq('arranca sin vault', storage.estado().inicializado, false);
+  await lanza('listar con el vault cerrado explota', () => storage.listWalletsPublic(), 'bloqueado');
+
+  // 2. Crear el vault con la contrasena maestra
+  storage.crearVault(maestra);
+  eq('el vault queda inicializado', storage.estado().inicializado, true);
+  eq('el vault queda abierto', storage.estado().desbloqueado, true);
+  eq('lista inicial vacia', storage.listWalletsPublic().length, 0);
+  await lanza('crear un vault encima de otro explota', () => storage.crearVault('otra'), 'Ya existe');
+
+  // 3. Guardar wallet: sin contrasena propia, la maestra ya autorizo la sesion
   const savedList = storage.saveWallet({
     name: 'Test Wallet',
     address: testAddr,
     type: 'hex',
-    secret: testSecret,
-    password: testPass
+    secret: testSecret
   });
 
   eq('lista tiene 1 wallet', savedList.length, 1);
@@ -240,47 +248,168 @@ async function main() {
   eq('tipo coincide', savedList[0].type, 'hex');
   eq('Legacy no recibe xpub', savedList[0].xpub, null);
   eq('Legacy no recibe indice de recepcion', savedList[0].receiveIndex, undefined);
+  eq('la semilla sale del vault sin pedir nada mas', storage.getSecret(savedList[0].id), testSecret);
 
-  // 3. Desencriptar
-  const decrypted = storage.getDecryptedSecret(savedList[0].id, testPass);
-  eq('secreto descifrado coincide', decrypted, testSecret);
+  // 4. En disco no queda NADA legible: ni la semilla, ni la direccion, ni el
+  //    nombre. El archivo entero va cifrado, asi que robarlo sin la maestra no
+  //    dice ni cuantas billeteras hay.
+  const enDisco = fs.readFileSync(storage.filePath, 'utf8');
+  ok('el secreto no esta en claro en el archivo', !enDisco.includes(testSecret));
+  ok('la direccion no esta en claro en el archivo', !enDisco.includes(testAddr));
+  ok('el nombre no esta en claro en el archivo', !enDisco.includes('Test Wallet'));
 
-  // 4. Intentar descifrar con contrasenia incorrecta
-  assert.throws(
-    () => storage.getDecryptedSecret(savedList[0].id, 'incorrecta'),
-    /Contraseña incorrecta/
-  );
-  console.log('  OK  error lanzado al descifrar con clave incorrecta');
-  passed++;
+  // 5. Cerrar y volver a abrir
+  storage.bloquear();
+  eq('el vault queda cerrado', storage.estado().desbloqueado, false);
+  await lanza('la semilla no sale con el vault cerrado', () => storage.getSecret(savedList[0].id), 'bloqueado');
+  await lanza('abrir con la contrasena equivocada explota',
+    () => storage.desbloquear('incorrecta'), 'Contraseña incorrecta');
 
-  // 5. Guardar la nueva variante HD con semilla hexadecimal
+  storage.desbloquear(maestra);
+  eq('reabierto, la wallet sigue ahi', storage.listWalletsPublic().length, 1);
+  eq('reabierto, la semilla coincide', storage.getSecret(savedList[0].id), testSecret);
+
+  // 6. Guardar la variante HD con semilla hexadecimal
   const savedWithHd = storage.saveWallet({
     name: 'Test HD Hex',
     address: hexHdAddresses[0].address,
     type: 'hex_hd',
-    secret: hexHdSeed,
-    password: testPass
+    secret: hexHdSeed
   });
   eq('lista tiene tambien la HD hexadecimal', savedWithHd.length, 2);
   const savedHd = savedWithHd.find((wallet) => wallet.type === 'hex_hd');
   eq('HD hexadecimal guarda su xpub', savedHd.xpub, hexHdXpub);
   eq('HD hexadecimal inicia receiveIndex en 0', savedHd.receiveIndex, 0);
   eq('HD hexadecimal inicia changeIndex en 0', savedHd.changeIndex, 0);
-  eq('semilla HD descifrada coincide', storage.getDecryptedSecret(savedHd.id, testPass), hexHdSeed);
+  eq('semilla HD descifrada coincide', storage.getSecret(savedHd.id), hexHdSeed);
 
-  // 6. Borrar wallets
+  // 7. Grupos: carpetas para juntar billeteras y ver el saldo de cada conjunto.
+  //    Un grupo no toca claves ni direcciones, pero SI decide que se suma con
+  //    que, asi que un error aca se lee como plata que aparece o desaparece.
+  eq('el vault arranca sin grupos', storage.listGroups().length, 0);
+
+  const ahorros = storage.createGroup('  Ahorros  ');
+  eq('el nombre del grupo se guarda sin espacios de sobra', ahorros.name, 'Ahorros');
+  eq('el grupo aparece en la lista', storage.listGroups().length, 1);
+  await lanza('un grupo sin nombre explota', () => storage.createGroup('   '), 'necesita un nombre');
+  // Dos grupos con el mismo nombre son indistinguibles en pantalla, y mover una
+  // billetera al equivocado es justo el error que despues cuesta ver.
+  await lanza('repetir el nombre de un grupo explota', () => storage.createGroup('ahorros'), 'Ya hay un grupo');
+
+  eq('una billetera guardada arranca sin grupo', storage.listWalletsPublic()[0].groupId, null);
+  const conGrupo = storage.assignWalletGroup(savedList[0].id, ahorros.id);
+  eq(
+    'la billetera queda en el grupo',
+    conGrupo.find((wallet) => wallet.id === savedList[0].id).groupId,
+    ahorros.id
+  );
+  await lanza(
+    'mover una billetera a un grupo inexistente explota',
+    () => storage.assignWalletGroup(savedList[0].id, 'grupo-que-no-existe'),
+    'Grupo no encontrado'
+  );
+  await lanza(
+    'guardar una billetera en un grupo inexistente explota',
+    () => storage.saveWallet({
+      name: 'Fantasma',
+      address: 'bitcoincash:qq0000000000000000000000000000000000000000',
+      type: 'hex',
+      secret: testSecret,
+      groupId: 'grupo-que-no-existe',
+    }),
+    'Grupo no encontrado'
+  );
+  eq('y la billetera rechazada no quedo guardada', storage.listWalletsPublic().length, 2);
+
+  storage.renameGroup(ahorros.id, 'Ahorros largo plazo');
+  eq('renombrar cambia el nombre', storage.listGroups()[0].name, 'Ahorros largo plazo');
+  await lanza(
+    'renombrar un grupo que no existe explota',
+    () => storage.renameGroup('grupo-que-no-existe', 'Otro'),
+    'Grupo no encontrado'
+  );
+
+  // Los grupos viajan cifrados con todo lo demas: el archivo robado tampoco
+  // dice como tiene organizada la plata el dueño.
+  const enDiscoConGrupos = fs.readFileSync(storage.filePath, 'utf8');
+  ok('el nombre del grupo no esta en claro en el archivo', !enDiscoConGrupos.includes('Ahorros'));
+
+  storage.bloquear();
+  storage.desbloquear(maestra);
+  eq('reabierto, el grupo sigue ahi', storage.listGroups()[0].name, 'Ahorros largo plazo');
+  eq(
+    'reabierto, la billetera sigue en su grupo',
+    storage.listWalletsPublic().find((wallet) => wallet.id === savedList[0].id).groupId,
+    ahorros.id
+  );
+
+  // Lo que mas importa de borrar un grupo: NO se lleva puestas las billeteras.
+  eq('borrar el grupo lo saca de la lista', storage.deleteGroup(ahorros.id).length, 0);
+  eq('pero las billeteras siguen guardadas', storage.listWalletsPublic().length, 2);
+  eq(
+    'y quedan sin grupo, no invisibles',
+    storage.listWalletsPublic().find((wallet) => wallet.id === savedList[0].id).groupId,
+    null
+  );
+  eq('la semilla sobrevive al borrado del grupo', storage.getSecret(savedList[0].id), testSecret);
+  await lanza(
+    'borrar dos veces el mismo grupo explota',
+    () => storage.deleteGroup(ahorros.id),
+    'Grupo no encontrado'
+  );
+
+  // 8. Un vault de la version anterior guardaba la lista de billeteras pelada,
+  //    sin grupos. Tiene que abrirse igual: si no, las billeteras del usuario
+  //    parecen perdidas aunque el archivo este intacto.
+  {
+    const nodeCrypto = require('node:crypto');
+    const archivo = JSON.parse(fs.readFileSync(storage.filePath, 'utf8'));
+    const params = archivo.kdf;
+    const key = nodeCrypto.pbkdf2Sync(
+      maestra, Buffer.from(archivo.salt, 'hex'), params.iterations, params.keyLength, params.hash
+    );
+
+    const decipher = nodeCrypto.createDecipheriv('aes-256-gcm', key, Buffer.from(archivo.iv, 'hex'));
+    decipher.setAuthTag(Buffer.from(archivo.tag, 'hex'));
+    const plano = decipher.update(archivo.encryptedText, 'hex', 'utf8') + decipher.final('utf8');
+    const listaPelada = JSON.stringify(JSON.parse(plano).wallets);
+
+    const iv = nodeCrypto.randomBytes(12);
+    const cipher = nodeCrypto.createCipheriv('aes-256-gcm', key, iv);
+    const cifrado = cipher.update(listaPelada, 'utf8', 'hex') + cipher.final('hex');
+    storage.bloquear();
+    fs.writeFileSync(storage.filePath, JSON.stringify({
+      version: 2,
+      kdf: params,
+      salt: archivo.salt,
+      iv: iv.toString('hex'),
+      tag: cipher.getAuthTag().toString('hex'),
+      encryptedText: cifrado,
+    }, null, 2));
+
+    storage.desbloquear(maestra);
+    eq('un vault de la version anterior se abre igual', storage.listWalletsPublic().length, 2);
+    eq('y arranca sin grupos, no roto', storage.listGroups().length, 0);
+    eq('con las semillas intactas', storage.getSecret(savedList[0].id), testSecret);
+    // Y desde ahi se puede seguir: el formato nuevo se escribe al primer cambio.
+    const migrado = storage.createGroup('Despues de migrar');
+    storage.bloquear();
+    storage.desbloquear(maestra);
+    eq('el grupo creado sobre el vault migrado persiste', storage.listGroups()[0].name, 'Despues de migrar');
+    storage.deleteGroup(migrado.id);
+  }
+
+  // 9. Borrar wallets
   storage.deleteWallet(savedHd.id);
   const afterDelete = storage.deleteWallet(savedList[0].id);
   eq('lista vuelve a estar vacia', afterDelete.length, 0);
 
   // Limpieza final
-  if (fs.existsSync(storage.filePath)) {
-    fs.unlinkSync(storage.filePath);
-  }
+  storage.bloquear();
   // storage escribe un .bak al guardar: si no se borra, el rmdir de abajo falla
   // en silencio y queda test_data/ con wallets de prueba adentro.
-  if (fs.existsSync(storage.filePath + '.bak')) {
-    fs.unlinkSync(storage.filePath + '.bak');
+  for (const f of [storage.filePath, storage.filePath + '.bak', storage.legacyPath]) {
+    if (fs.existsSync(f)) fs.unlinkSync(f);
   }
   const testDataDir = path.dirname(storage.filePath);
   if (fs.existsSync(testDataDir)) {
@@ -369,6 +498,87 @@ async function main() {
   }
 
   {
+    // 0-conf: en BCH no hay RBF, asi que una tx del mempool no se puede
+    // reemplazar por otra que pague mas. Gastarla es parte del diseño de la
+    // red, y no hacerlo dejaba plata visible en pantalla pero inmovil.
+    const real = { tx_hash: 'aa', tx_pos: 0, height: 964000, value: 1000 };
+    const fresca = { tx_hash: 'nn', tx_pos: 1, height: 0, value: 7000 };
+    const v = consensus.resolveUtxos([
+      { operator: 'a', height: 964552, value: [real, fresca] },
+      { operator: 'b', height: 964552, value: [real, fresca] },
+    ]);
+    ok('un UTXO del mempool que ven dos operadores se puede gastar',
+       v.value.some(u => u.tx_hash === 'nn'));
+    eq('y se cuenta como sin confirmar', v.sinConfirmar, 1);
+    ok('el mempool no rompe el consenso de lo confirmado', v.verified === true);
+  }
+
+  {
+    // Un mempool que vio uno solo no alcanza: puede ser propagacion a medias o
+    // puede ser un servidor inventando una moneda que no existe. Sin un segundo
+    // testigo no hay forma de distinguirlas, y con esto se firma.
+    const real = { tx_hash: 'aa', tx_pos: 0, height: 964000, value: 1000 };
+    const soloUno = { tx_hash: 'zz', tx_pos: 0, height: 0, value: 500000 };
+    const v = consensus.resolveUtxos([
+      { operator: 'a', height: 964552, value: [real, soloUno] },
+      { operator: 'b', height: 964552, value: [real] },
+      { operator: 'c', height: 964552, value: [real] },
+    ]);
+    ok('un UTXO del mempool que ve un solo operador NO entra',
+       v.value.every(u => u.tx_hash !== 'zz'));
+    ok('y que uno vea de mas no invalida lo confirmado', v.verified === true);
+  }
+
+  {
+    // El monto es parte de la identidad: el mismo outpoint por otra plata no
+    // es el mismo UTXO, y sumarlos daria por bueno un monto que nadie confirmo.
+    const v = consensus.resolveUtxos([
+      { operator: 'a', height: 964552, value: [{ tx_hash: 'nn', tx_pos: 0, height: 0, value: 7000 }] },
+      { operator: 'b', height: 964552, value: [{ tx_hash: 'nn', tx_pos: 0, height: 0, value: 9000 }] },
+    ]);
+    eq('el mismo outpoint con montos distintos no junta quorum', v.sinConfirmar, 0);
+  }
+
+  {
+    // Dos hosts del mismo dueño son un testigo, tambien para el mempool.
+    const fresca = { tx_hash: 'nn', tx_pos: 0, height: 0, value: 7000 };
+    const v = consensus.utxosConQuorum([
+      { operator: 'imaginary.cash', value: [fresca] },
+      { operator: 'imaginary.cash', value: [fresca] },
+    ]);
+    eq('el mismo operador dos veces no hace quorum', v.length, 0);
+  }
+
+  {
+    // -1 es mempool con padre sin confirmar: cadena de 0-conf. BCH la permite.
+    const encadenada = { tx_hash: 'cc', tx_pos: 0, height: -1, value: 3000 };
+    const v = consensus.utxosConQuorum([
+      { operator: 'a', value: [encadenada] },
+      { operator: 'b', value: [encadenada] },
+    ]);
+    eq('una cadena de sin confirmar tambien se puede gastar', v.length, 1);
+  }
+
+  {
+    // Confirmarse no puede volver una moneda MENOS gastable.
+    //
+    // El operador `a` va un bloque atras y todavia ve la moneda en el mempool;
+    // `b` y `c` ya procesaron el bloque y la reportan a una altura por encima
+    // del corte comun. Con el recorte solo, la moneda se caia de los dos lados:
+    // arriba del corte para los confirmados, y con un solo avistaje en el
+    // mempool. Un segundo antes, sin confirmar, era gastable.
+    const fresca = { tx_hash: 'nn', tx_pos: 0, value: 7000 };
+    const v = consensus.resolveUtxos([
+      { operator: 'a', height: 964552, value: [{ ...fresca, height: 0 }] },
+      { operator: 'b', height: 964553, value: [{ ...fresca, height: 964553 }] },
+      { operator: 'c', height: 964553, value: [{ ...fresca, height: 964553 }] },
+    ]);
+    ok('una moneda recien minada con un operador atrasado sigue siendo gastable',
+       v.value.some(u => u.tx_hash === 'nn'));
+    eq('y entra una sola vez', v.value.filter(u => u.tx_hash === 'nn').length, 1);
+  }
+
+  {
     // El orden en que cada servidor devuelve los UTXOs no debe importar.
     const u1 = { tx_hash: 'aa', tx_pos: 0, height: 964000, value: 1000 };
     const u2 = { tx_hash: 'bb', tx_pos: 1, height: 964001, value: 2000 };
@@ -395,6 +605,57 @@ async function main() {
     ]);
     ok('el historial coincide ignorando el mempool', v.verified === true);
     eq('devuelve la confirmada y la pendiente', v.value.length, 2);
+  }
+
+  {
+    // El caso que rompio la wallet: un pago recien confirmado desaparecia.
+    //
+    // El operador `a` ya proceso el bloque nuevo y reporta la tx a esa altura;
+    // `b` todavia no y la sigue viendo en el mempool. La altura de corte se va
+    // al tip mas bajo, y la tx queda por ENCIMA: fuera de la comparacion (bien,
+    // el desfase no es una mentira) pero tambien fuera de la respuesta (mal, es
+    // plata que existe). El barrido HD lee ese historial vacio como "esta
+    // direccion nunca se uso", se saltea la consulta de saldo, y el detalle de
+    // la billetera muestra 0 mientras la lista —que pregunta el saldo directo—
+    // muestra el monto real.
+    const v = consensus.resolveHistory([
+      { operator: 'a', height: 964553, value: [{ tx_hash: 'vieja', height: 964000 }, { tx_hash: 'nueva', height: 964553 }] },
+      { operator: 'b', height: 964552, value: [{ tx_hash: 'vieja', height: 964000 }, { tx_hash: 'nueva', height: 0 }] },
+    ]);
+    ok('un bloque de desfase sigue sin ser discrepancia', v.verified === true);
+    eq('la altura de corte es la del mas atrasado', v.cutoffHeight, 964552);
+    ok('la tx recien confirmada NO se pierde',
+       v.value.some(e => e.tx_hash === 'nueva'));
+    eq('y no se duplica por verla dos veces', v.value.filter(e => e.tx_hash === 'nueva').length, 1);
+    eq('se queda con la altura confirmada, no con la del mempool',
+       v.value.find(e => e.tx_hash === 'nueva').height, 964553);
+  }
+
+  {
+    // El mismo desfase, en la direccion que estrena su primera transaccion:
+    // ahi el historial recortado no queda corto, queda VACIO, que es la unica
+    // respuesta que el barrido interpreta como certeza.
+    const v = consensus.resolveHistory([
+      { operator: 'a', height: 964553, value: [{ tx_hash: 'nueva', height: 964553 }] },
+      { operator: 'b', height: 964552, value: [{ tx_hash: 'nueva', height: 0 }] },
+    ]);
+    eq('una direccion estrenada no se reporta como sin actividad', v.value.length, 1);
+  }
+
+  {
+    // El otro lado del trato: sumar lo que vio cada uno no puede volverse una
+    // puerta para meter transacciones inventadas por debajo del corte, que es
+    // justo el tramo que el consenso si compara.
+    const real = { tx_hash: 'aa', height: 964000 };
+    const fantasma = { tx_hash: 'ff', height: 964100 };
+    const v = consensus.resolveHistory([
+      { operator: 'a', height: 964552, value: [real] },
+      { operator: 'b', height: 964552, value: [real] },
+      { operator: 'c', height: 964552, value: [real, fantasma] },
+    ]);
+    ok('el operador que inventa una tx confirmada queda afuera del grupo',
+       v.value.every(e => e.tx_hash !== 'ff'));
+    ok('y la discrepancia se reporta', v.verified === false);
   }
 
   {
@@ -671,18 +932,19 @@ async function main() {
     }
 
     {
-      // Saldo suficiente pero desparramado en mas monedas de las que entran.
-      // El error tiene que decir eso, no "no te alcanza".
+      // Saldo desparramado en muchas direcciones chicas. No hay tope propio de
+      // entradas: si el saldo alcanza, el envio sale. Un tope inventado le
+      // negaria al usuario una transaccion que la red si acepta.
       const muchas = [];
-      for (let i = 0; i < 60; i++) muchas.push(utxo('addr' + i, 1000));
+      for (let i = 0; i < 60; i++) muchas.push(utxo('addr' + i, 10000));
 
-      assert.throws(
-        () => coinselect.selectCoins({ utxos: muchas, amountSats: 55000 }),
-        /tope/i,
-        'FALLO: demasiadas monedas tiene que explicarse por el tope de entradas'
-      );
-      console.log('  OK  demasiadas monedas: el error explica el tope');
-      passed++;
+      const sel = coinselect.selectCoins({ utxos: muchas, amountSats: 550000 });
+
+      ok('60 direcciones se unen sin toparse con un limite propio',
+        sel.addressCount > 50);
+      ok('y avisa que unio direcciones', sel.merged === true);
+      ok('el total alcanza para monto mas comision',
+        sel.totalIn >= 550000 + sel.feeSats);
     }
 
     {
@@ -706,6 +968,19 @@ async function main() {
       eq('sin arrastrar el polvo', plan.utxoCount, 2);
       eq('comision de dos entradas y una salida', plan.feeSats, 10 + 2 * 149 + 34);
       eq('el maximo es todo menos la comision', plan.maxSats, 150000 - (10 + 2 * 149 + 34));
+    }
+
+    {
+      // Vaciar es vaciar: 80 monedas rentables se barren las 80. Dejar resto
+      // convierte "enviar todo" en una operacion que no envia todo, y obliga a
+      // una segunda tx al mismo destino —mas comision y mas huella temporal.
+      const utxos = [];
+      for (let i = 0; i < 80; i++) utxos.push(utxo('addr' + i, 10000));
+      const plan = coinselect.planMaxSend({ utxos });
+
+      eq('barre las 80 monedas', plan.utxoCount, 80);
+      eq('y las 80 direcciones', plan.addressCount, 80);
+      eq('sin dejar nada afuera', plan.totalSats, 800000);
     }
   }
 

@@ -23,12 +23,15 @@ const OUTPUT_SIZE = 34;
 // Por debajo de esto la red no acepta una salida.
 const DUST_LIMIT = 546;
 
-// Tope de entradas por transaccion. No es un limite de consenso —BCH acepta
-// transacciones mucho mas grandes— sino de sentido comun: 50 entradas ya son
-// ~7,5 KB de transaccion, ~7500 sats de comision, y 50 direcciones tuyas
-// unidas para siempre. Si un envio necesita mas que esto, el usuario tiene que
-// enterarse, no descubrirlo en la comision.
-const MAX_INPUTS = 50;
+// NO hay tope propio de entradas por transaccion, y no hay que reintroducirlo.
+// Electrum y Electron Cash tampoco lo tienen: agrupan por direccion igual que
+// aca, pero el borde se lo deja al tamaño maximo de transaccion que aceptan los
+// nodos, no a un contador inventado. Un tope propio rechaza envios que la red
+// si acepta, y se los presenta al usuario como si el limite fuera de la red.
+//
+// La defensa de privacidad no la daba ese numero: la da la estructura de
+// abajo —una sola direccion cuando alcanza, union de mayor a menor cuando no—
+// mas el aviso de `merged` antes de firmar.
 
 function txSize(inputCount, outputCount) {
   return BASE_SIZE + inputCount * INPUT_SIZE + outputCount * OUTPUT_SIZE;
@@ -90,14 +93,6 @@ function planFor(selected, amountSats, feeRate = 1) {
   return { ok: true, feeSats: totalIn - amountSats, changeSats: 0, totalIn, inputCount: n };
 }
 
-// Un grupo mas grande que el tope no entra entero. Se toman sus UTXOs mas
-// grandes: es lo unico que rompe la atomicidad del grupo, y solo porque el
-// limite de tamaño lo obliga.
-function recortarAlTope(utxos, maxInputs) {
-  if (utxos.length <= maxInputs) return utxos;
-  return utxos.slice().sort((a, b) => b.value - a.value).slice(0, maxInputs);
-}
-
 // Elige que UTXOs gastar para enviar `amountSats`.
 //
 // Devuelve { inputs, feeSats, changeSats, totalIn, inputCount, addressCount,
@@ -105,9 +100,8 @@ function recortarAlTope(utxos, maxInputs) {
 // no rentables y `merged` dice si hubo que unir mas de una direccion — lo que
 // la UI tiene que avisar antes de que el usuario firme.
 //
-// Tira error si no alcanza, distinguiendo el motivo: no es lo mismo "no tenes
-// saldo" que "lo tenes repartido en mas direcciones de las que entran".
-function selectCoins({ utxos, amountSats, feeRate = 1, maxInputs = MAX_INPUTS }) {
+// Tira error solo si de verdad no alcanza el saldo.
+function selectCoins({ utxos, amountSats, feeRate = 1 }) {
   if (!Array.isArray(utxos) || utxos.length === 0) {
     throw new Error('No hay fondos suficientes (0 UTXOs).');
   }
@@ -136,10 +130,11 @@ function selectCoins({ utxos, amountSats, feeRate = 1, maxInputs = MAX_INPUTS })
   // podrian elegirse distinto en cada llamada y el usuario terminaria firmando
   // algo que no es lo que aprobo.
   const solitarios = grupos
-    .map(g => {
-      const seleccion = recortarAlTope(g.utxos, maxInputs);
-      return { address: g.address, seleccion, plan: planFor(seleccion, amountSats, feeRate) };
-    })
+    .map(g => ({
+      address: g.address,
+      seleccion: g.utxos,
+      plan: planFor(g.utxos, amountSats, feeRate),
+    }))
     .filter(c => c.plan.ok)
     .sort((a, b) =>
       a.seleccion.length - b.seleccion.length ||
@@ -168,7 +163,6 @@ function selectCoins({ utxos, amountSats, feeRate = 1, maxInputs = MAX_INPUTS })
   let seleccion = [];
 
   for (const g of porTamaño) {
-    if (seleccion.length + g.utxos.length > maxInputs) break;
     acumulados.push(g);
     seleccion = seleccion.concat(g.utxos);
     const plan = planFor(seleccion, amountSats, feeRate);
@@ -183,17 +177,9 @@ function selectCoins({ utxos, amountSats, feeRate = 1, maxInputs = MAX_INPUTS })
     }
   }
 
-  // Llegar aca es no poder cubrir el monto. El mensaje tiene que decir por que.
+  // Llegar aca es no poder cubrir el monto: se probaron TODAS las direcciones.
   const totalRentable = rentables.reduce((s, u) => s + u.value, 0);
   const totalDescartado = skipped.reduce((s, u) => s + u.value, 0);
-
-  if (rentables.length > maxInputs) {
-    throw new Error(
-      'Tenes saldo, pero repartido en mas monedas de las que entran en una sola ' +
-      'transaccion (tope: ' + maxInputs + ' entradas). Envia un monto menor, o junta ' +
-      'los fondos en varios envios.'
-    );
-  }
 
   let mensaje = 'No alcanza el saldo para cubrir el monto mas la comision de red.';
   if (totalDescartado > 0) {
@@ -206,10 +192,10 @@ function selectCoins({ utxos, amountSats, feeRate = 1, maxInputs = MAX_INPUTS })
 // Cuanto se puede enviar vaciando la wallet: todas las monedas rentables, una
 // sola salida, sin cambio. Barrer es explicito aca —es la operacion que el
 // usuario pidio— pero se informa cuantas direcciones va a unir.
-function planMaxSend({ utxos, feeRate = 1, maxInputs = MAX_INPUTS }) {
+function planMaxSend({ utxos, feeRate = 1 }) {
   const rentables = (utxos || []).filter(u => isProfitable(u, feeRate));
   const skipped = (utxos || []).filter(u => !isProfitable(u, feeRate));
-  const seleccion = recortarAlTope(rentables, maxInputs);
+  const seleccion = rentables;
 
   const totalIn = seleccion.reduce((s, u) => s + u.value, 0);
   const feeSats = seleccion.length === 0 ? 0 : estimateFee(seleccion.length, 1, feeRate);
@@ -222,7 +208,6 @@ function planMaxSend({ utxos, feeRate = 1, maxInputs = MAX_INPUTS }) {
     totalSats: totalIn,
     utxoCount: seleccion.length,
     addressCount: groupByAddress(seleccion).length,
-    leftOut: rentables.length - seleccion.length,
     skipped,
   };
 }
@@ -232,7 +217,6 @@ module.exports = {
   INPUT_SIZE,
   OUTPUT_SIZE,
   DUST_LIMIT,
-  MAX_INPUTS,
   txSize,
   estimateFee,
   inputCost,

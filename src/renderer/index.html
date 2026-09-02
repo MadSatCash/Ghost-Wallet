@@ -21,6 +21,31 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <!-- Candado de arranque: la unica contrasena de la app. Tapa todo hasta que
+       se abre el vault, asi que ninguna pantalla puede pedir datos antes. -->
+  <div id="lock-screen" class="lock-screen">
+    <div class="lock-card">
+      <img src="logo.png" alt="GW" class="lock-logo">
+      <h2 id="lock-title" class="lock-title"></h2>
+      <p id="lock-subtitle" class="lock-subtitle"></p>
+
+      <label class="field">
+        <span id="lock-password-label"></span>
+        <input type="password" id="lock-password" autocomplete="off" data-i18n-placeholder="password_placeholder" placeholder="Tu contraseña" />
+      </label>
+
+      <label class="field hidden" id="lock-confirm-field">
+        <span data-i18n="password_confirm_label">Repetí la contraseña</span>
+        <input type="password" id="lock-password-confirm" autocomplete="off" data-i18n-placeholder="password_confirm_placeholder" placeholder="Repetí tu contraseña" />
+      </label>
+
+      <div id="lock-warning" class="warning hidden" data-i18n="lock_no_recovery"></div>
+
+      <button class="btn primary" id="btn-unlock"></button>
+      <div id="lock-error" class="error hidden"></div>
+    </div>
+  </div>
+
   <header class="topbar">
     <div class="brand">
       <img src="logo.png" alt="GW" class="logo">
@@ -38,7 +63,7 @@
         <span id="tor-status-text">Iniciando Tor...</span>
       </span>
       <button id="btn-new-circuit" class="btn-circuit" disabled data-i18n="new_circuit" data-i18n-title="new_circuit_title" title="Cambiar la ruta de conexión por la red Tor (New Identity)">↻ Nuevo circuito</button>
-      <span class="badge" data-i18n="version_badge">v0.10.0 &middot; Privacidad Total</span>
+      <span class="badge" data-i18n="version_badge">v0.11.0 &middot; Privacidad Total</span>
     </div>
   </header>
 
@@ -63,8 +88,48 @@
       </div>
 
       <div id="saved-wallets-section" class="hidden">
-        <h3 data-i18n="saved_wallets_title">Tus billeteras guardadas</h3>
-        <div id="saved-wallets-list" class="wallets-list"></div>
+        <!-- El total de TODO lo guardado se ve igual en la columna de grupos y
+             adentro de un grupo: el que abre la app quiere saber primero cuanto
+             tiene en total, no cuanto tiene la carpeta que esta mirando. -->
+        <div class="grand-total">
+          <div class="grand-total-label" data-i18n="grand_total_label">Saldo total de todas tus billeteras</div>
+          <div class="grand-total-amount" id="grand-total-amount">... BCH</div>
+          <div class="grand-total-sub">
+            <span id="grand-total-sats" class="grand-total-sats"></span>
+            <span id="grand-total-fiat" class="grand-total-fiat"></span>
+          </div>
+          <div id="grand-total-note" class="total-note hidden"></div>
+        </div>
+
+        <!-- Columna 1: los grupos -->
+        <div id="groups-view">
+          <div class="list-head">
+            <h3 data-i18n="groups_title">Tus grupos</h3>
+            <button class="btn-inline" id="btn-new-group" data-i18n="new_group">+ Nuevo grupo</button>
+          </div>
+          <div id="groups-list" class="groups-list"></div>
+        </div>
+
+        <!-- Columna 2: las billeteras del grupo elegido. Reemplaza a la de
+             grupos en el mismo lugar, no se apila debajo. -->
+        <div id="wallets-view" class="hidden">
+          <div class="list-head">
+            <button class="back-inline" id="btn-back-to-groups" data-i18n="back_to_groups">← Todos los grupos</button>
+            <div class="group-head-actions" id="group-head-actions">
+              <button class="btn-inline" id="btn-rename-group" data-i18n="rename_group">Renombrar</button>
+              <button class="btn-inline danger-inline" id="btn-delete-group" data-i18n="delete_group">Eliminar grupo</button>
+            </div>
+          </div>
+          <div class="group-head">
+            <h3 id="group-head-name" class="group-head-name"></h3>
+            <div class="group-head-total">
+              <span id="group-head-amount" class="group-head-amount"></span>
+              <span id="group-head-fiat" class="group-head-fiat"></span>
+            </div>
+          </div>
+          <div id="group-head-note" class="total-note hidden"></div>
+          <div id="saved-wallets-list" class="wallets-list"></div>
+        </div>
       </div>
     </section>
 
@@ -114,12 +179,8 @@
             <input type="text" id="save-create-name" data-i18n-placeholder="wallet_name_placeholder_create" placeholder="Ej: Mi Billetera Principal" />
           </label>
           <label class="field">
-            <span data-i18n="password_label">Contraseña de seguridad (para encriptar la clave privada)</span>
-            <input type="password" id="save-create-password" data-i18n-placeholder="password_placeholder" placeholder="Tu contraseña" />
-          </label>
-          <label class="field">
-            <span data-i18n="password_confirm_label">Repetí la contraseña</span>
-            <input type="password" id="save-create-password-confirm" data-i18n-placeholder="password_confirm_placeholder" placeholder="Repetí tu contraseña" />
+            <span data-i18n="group_label_optional">Grupo (opcional)</span>
+            <select id="save-create-group"></select>
           </label>
           <button class="btn success" id="btn-save-created" data-i18n="save_button">Guardar en la compu</button>
           <div id="save-create-error" class="error hidden"></div>
@@ -159,12 +220,8 @@
           <input type="text" id="save-import-name" data-i18n-placeholder="wallet_name_placeholder_import" placeholder="Ej: Importada" />
         </label>
         <label class="field">
-          <span data-i18n="password_label">Contraseña de seguridad (para encriptar la clave privada)</span>
-          <input type="password" id="save-import-password" data-i18n-placeholder="password_placeholder" placeholder="Tu contraseña" />
-        </label>
-        <label class="field">
-          <span data-i18n="password_confirm_label">Repetí la contraseña</span>
-          <input type="password" id="save-import-password-confirm" data-i18n-placeholder="password_confirm_placeholder" placeholder="Repetí tu contraseña" />
+          <span data-i18n="group_label_optional">Grupo (opcional)</span>
+          <select id="save-import-group"></select>
         </label>
         <button class="btn success" id="btn-save-imported" data-i18n="save_button">Guardar en la compu</button>
         <div id="save-import-error" class="error hidden"></div>
@@ -176,6 +233,12 @@
       <button class="back" data-go="welcome" data-i18n="back_home">← Volver al inicio</button>
       <h2 id="details-wallet-name">Detalles de Wallet</h2>
       <p class="subtitle" id="details-wallet-type"></p>
+
+      <div class="details-group-row">
+        <span class="details-group-label" data-i18n="group_label">Grupo:</span>
+        <span id="details-wallet-group" class="details-group-name"></span>
+        <button class="btn-inline" id="btn-change-group" data-i18n="change_group">Cambiar</button>
+      </div>
 
       <div id="details-balance-container"></div>
       <div id="details-address-container"></div>
@@ -192,16 +255,6 @@
         <button class="btn secondary" id="btn-go-history" data-i18n="view_history">Ver historial de pagos</button>
         <div class="reveal-box">
           <button class="btn danger" id="btn-reveal-secret" data-i18n="reveal_secret">Ver clave privada / semilla</button>
-          <div id="reveal-password-field" class="hidden">
-            <label class="field">
-              <span data-i18n="enter_password_reveal">Ingresa tu contraseña para revelar</span>
-              <input type="password" id="reveal-password" data-i18n-placeholder="password_placeholder" placeholder="Tu contraseña" />
-            </label>
-            <div class="row">
-              <button class="btn" id="btn-confirm-reveal" data-i18n="confirm">Confirmar</button>
-              <button class="btn secondary" id="btn-cancel-reveal" data-i18n="cancel">Cancelar</button>
-            </div>
-          </div>
           <div id="revealed-secret-container" class="hidden result"></div>
         </div>
 
@@ -219,6 +272,7 @@
         <div id="send-balance-container" class="hint" style="margin-bottom: 16px; color: var(--bch); font-weight: 600; font-size: 15px; text-align: center; background: rgba(10,193,142,0.1); padding: 12px; border-radius: 8px;">
           <span data-i18n="available_balance">Saldo disponible:</span> <span id="send-wallet-balance">...</span> BCH
           <div id="send-balance-fiat" class="fiat-sub"></div>
+          <div id="send-balance-unconfirmed" class="send-unconfirmed hidden"></div>
         </div>
 
         <label class="field">
@@ -233,11 +287,6 @@
           </div>
           <input type="text" inputmode="decimal" id="send-amount" placeholder="0.01" />
           <div id="send-satoshis" class="hint" style="margin-top: 6px; text-align: right; font-family: monospace; font-size: 14px; color: var(--muted);">0 satoshis</div>
-        </label>
-
-        <label class="field">
-          <span data-i18n="send_password_label">Contraseña de la billetera (para firmar la transacción)</span>
-          <input type="password" id="send-password" data-i18n-placeholder="password_placeholder" placeholder="Tu contraseña" />
         </label>
 
         <button class="btn primary" id="btn-confirm-send" data-i18n="confirm_send">Confirmar y Enviar</button>
