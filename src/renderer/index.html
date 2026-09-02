@@ -63,7 +63,7 @@
         <span id="tor-status-text">Iniciando Tor...</span>
       </span>
       <button id="btn-new-circuit" class="btn-circuit" disabled data-i18n="new_circuit" data-i18n-title="new_circuit_title" title="Cambiar la ruta de conexión por la red Tor (New Identity)">↻ Nuevo circuito</button>
-      <span class="badge" data-i18n="version_badge">v0.11.0 &middot; Privacidad Total</span>
+      <span class="badge" data-i18n="version_badge">v0.11.1 &middot; Privacidad Total</span>
     </div>
   </header>
 
@@ -243,11 +243,20 @@
       <div id="details-balance-container"></div>
       <div id="details-address-container"></div>
 
-      <div id="hd-addresses-container" class="hidden" style="margin-top: 1rem; border: 1px solid #333; border-radius: 8px; padding: 1rem;">
-        <h3 style="margin-top: 0;" data-i18n="receive_addresses_title">Direcciones de Recepción</h3>
-        <p class="hint" data-i18n="receive_hint">Usá cualquiera de estas direcciones para recibir BCH. Tu saldo total es la suma de todas ellas.</p>
-        <div id="hd-addresses-list" style="max-height: 200px; overflow-y: auto; margin-bottom: 1rem;"></div>
-        <button class="btn secondary" id="btn-generate-address" style="width: 100%;" data-i18n="generate_address">Generar nueva dirección</button>
+      <div id="hd-addresses-container" class="hidden">
+        <div id="hd-fresh-address"></div>
+        <button class="btn secondary" id="btn-generate-address" data-i18n="generate_address">Generar otra dirección</button>
+
+        <div class="addr-list">
+          <button class="addr-list-toggle" id="btn-toggle-addresses" aria-expanded="false" aria-controls="hd-addresses-panel">
+            <span class="addr-list-caret">&#9656;</span>
+            <span id="addr-list-toggle-text" data-i18n="see_all_addresses">Ver todas mis direcciones</span>
+          </button>
+          <div id="hd-addresses-panel" class="hidden">
+            <p class="hint" data-i18n="receive_hint">Cualquiera de estas direcciones sirve para recibir BCH. Tu saldo total es la suma de todas ellas.</p>
+            <div id="hd-addresses-list"></div>
+          </div>
+        </div>
       </div>
 
       <div class="details-actions">

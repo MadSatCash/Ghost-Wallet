@@ -806,6 +806,9 @@ var currentImportedSecret = '';
 var currentImportedType = '';
 var currentImportedAddress = '';
 var selectedWalletId = '';
+// Si la lista completa de direcciones esta desplegada. Sobrevive al repintado
+// del detalle: pedir una direccion nueva no tiene por que cerrarla en la cara.
+var listaDireccionesAbierta = false;
 var currentWalletBalanceSats = 0;
 // Parte del saldo que todavia esta en el mempool. Se puede gastar —BCH no
 // tiene RBF—, pero la pantalla de envio lo dice en vez de disimularlo.
@@ -1383,7 +1386,9 @@ async function showWalletDetails(id) {
   } else {
     addrContainer.classList.add('hidden');
     hdContainer.classList.remove('hidden');
-    $('#hd-addresses-list').innerHTML = '<div class="loading">' + t('loading_addresses') + '</div>';
+    $('#hd-fresh-address').innerHTML = '<div class="loading">' + t('loading_addresses') + '</div>';
+    $('#hd-addresses-list').innerHTML = '';
+    pintarDesplegableDeDirecciones(0);
   }
 
   var balContainer = $('#details-balance-container');
@@ -1399,23 +1404,7 @@ async function showWalletDetails(id) {
       b = await window.api.getBalance(w.address);
     } else {
       b = await window.api.getHdBalance(w.id);
-
-      var list = $('#hd-addresses-list');
-      list.innerHTML = '';
-      b.receiveAddresses.forEach(function(a) {
-        var div = document.createElement('div');
-        div.style.padding = '0.5rem';
-        div.style.borderBottom = '1px solid #444';
-        div.style.display = 'flex';
-        div.style.justifyContent = 'space-between';
-
-        var detail = b.details.find(function(d) { return d.address === a.address; });
-        var balText = detail ? ' (' + t('balance_prefix') + fmtBch(detail.confirmed + detail.unconfirmed) + ')' : ' (' + t('no_use') + ')';
-
-        div.innerHTML = '<span style="font-family: monospace; font-size: 0.9em; user-select: all;">' + a.address + '</span>' +
-                         '<span style="color: ' + (detail ? '#4caf50' : '#888') + '; font-size: 0.8em;">' + balText + '</span>';
-        list.appendChild(div);
-      });
+      pintarDireccionesDeRecepcion(b);
     }
 
     currentWalletBalanceSats = (b.confirmed || 0) + (b.unconfirmed || 0);
@@ -1439,16 +1428,89 @@ async function showWalletDetails(id) {
     currentWalletUnconfirmedSats = 0;
     saldos[w.id] = { error: true };
     balContainer.innerHTML = '<div class="error">' + t('balance_network_error', { error: escapeHtml(err.message || String(err)) }) + '</div>';
+    // Sin barrido no hay historial, y sin historial no se puede afirmar que
+    // una direccion este sin estrenar. Mejor decirlo que ofrecer cualquiera.
+    if (isHdWalletType(w.type)) {
+      $('#hd-fresh-address').innerHTML = '<div class="warning">' + escapeHtml(t('fresh_address_none')) + '</div>';
+      pintarDesplegableDeDirecciones(0);
+    }
   }
 }
+
+// El detalle ofrece UNA direccion para cobrar: la que la cadena confirma sin
+// estrenar. La lista completa queda plegada abajo — tenerla siempre a la vista
+// invita a repetir una direccion vieja, que es justo lo que conviene no hacer.
+function pintarDireccionesDeRecepcion(b) {
+  var destacada = $('#hd-fresh-address');
+  destacada.innerHTML = '';
+
+  if (b.direccionSinEstrenar) {
+    var caja = addressBox(t('fresh_address_label'), b.direccionSinEstrenar.address, t('fresh_address_note'));
+    caja.classList.add('fresh-address');
+    destacada.appendChild(caja);
+  } else {
+    destacada.innerHTML = '<div class="warning">' + escapeHtml(t('fresh_address_none')) + '</div>';
+  }
+
+  var lista = $('#hd-addresses-list');
+  lista.innerHTML = '';
+  b.receiveAddresses.forEach(function(a) {
+    var detalle = b.details.find(function(d) { return d.address === a.address; });
+    var saldo = detalle ? detalle.confirmed + detalle.unconfirmed : 0;
+
+    // "Sin estrenar" es lo que dijo la cadena, no la ausencia de saldo: una
+    // direccion que ya cobro y se vacio sigue siendo una direccion usada, y
+    // repetirla ata entre si los pagos que la miren.
+    var estado;
+    if (saldo > 0) estado = 'funded';
+    else if (detalle || a.historyLength > 0) estado = 'used';
+    else if (a.historyLength === 0) estado = 'fresh';
+    else estado = 'unknown';
+
+    var texto = estado === 'funded'
+      ? t('balance_prefix') + fmtBch(saldo)
+      : t(estado === 'fresh' ? 'addr_state_fresh' : (estado === 'used' ? 'addr_state_used' : 'addr_state_unknown'));
+
+    var fila = document.createElement('div');
+    fila.className = 'addr-row ' + estado;
+    fila.innerHTML = '<span class="addr-row-address">' + escapeHtml(a.address) + '</span>' +
+                     '<span class="addr-row-state">' + escapeHtml(texto) + '</span>';
+    lista.appendChild(fila);
+  });
+
+  pintarDesplegableDeDirecciones(b.receiveAddresses.length);
+}
+
+function pintarDesplegableDeDirecciones(cantidad) {
+  var panel = $('#hd-addresses-panel');
+  var boton = $('#btn-toggle-addresses');
+  panel.classList.toggle('hidden', !listaDireccionesAbierta);
+  boton.setAttribute('aria-expanded', listaDireccionesAbierta ? 'true' : 'false');
+  $('#addr-list-toggle-text').textContent = cantidad === 0
+    ? t('see_all_addresses')
+    : t(listaDireccionesAbierta ? 'hide_all_addresses' : 'see_all_addresses_count', { count: cantidad });
+}
+
+$('#btn-toggle-addresses').addEventListener('click', function() {
+  listaDireccionesAbierta = !listaDireccionesAbierta;
+  pintarDesplegableDeDirecciones($('#hd-addresses-list').childElementCount);
+});
 
 $('#btn-generate-address').addEventListener('click', async function() {
   var wallets = await window.api.listWallets();
   var w = wallets.find(function(x) { return x.id === selectedWalletId; });
   if (!w || !isHdWalletType(w.type)) return;
 
-  await window.api.incrementReceiveIndex(w.id);
-  showWalletDetails(w.id);
+  // Adelantar el puntero cuesta un rebarrido: sin esto, tres clics seguidos
+  // saltean tres direcciones y muestran la de la ultima consulta que vuelva.
+  var boton = this;
+  boton.disabled = true;
+  try {
+    await window.api.incrementReceiveIndex(w.id);
+    await showWalletDetails(w.id);
+  } finally {
+    boton.disabled = false;
+  }
 });
 
 // Guardado de wallet creada

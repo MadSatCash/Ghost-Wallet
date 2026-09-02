@@ -132,7 +132,12 @@ function aggregateVerification(balances) {
   };
 }
 
-async function discoverHdChain(xpub, branch, startFrom = 0) {
+// `hastaIndice` es el piso del barrido: se sigue caminando hasta cubrir ese
+// indice aunque el gap ya se haya cumplido. Existe porque el puntero de
+// recepcion se puede empujar a mano ("generar nueva direccion") y una
+// direccion entregada tiene que quedar vigilada: si el gap corta antes, la
+// wallet no mira donde el usuario mando a pagar.
+async function discoverHdChain(xpub, branch, startFrom = 0, hastaIndice = 0) {
   const discovered = [];
   // Veredictos del cruce entre operadores de cada historial consultado. Son
   // evidencia de primera: "esta direccion nunca tuvo actividad" es una
@@ -211,7 +216,7 @@ async function discoverHdChain(xpub, branch, startFrom = 0) {
         consecutiveEmpty = 0;
       } else {
         consecutiveEmpty += 1;
-        if (consecutiveEmpty >= GAP_LIMIT) {
+        if (consecutiveEmpty >= GAP_LIMIT && r.address.index >= hastaIndice) {
           stopWalking = true;
           break;
         }
@@ -269,7 +274,7 @@ async function resolveHdWalletAddresses(w) {
   if (!isHdWallet(w) || !w.xpub) throw new Error('Wallet HD no encontrada');
 
   const [receiveResult, changeResult] = await Promise.all([
-    discoverHdChain(w.xpub, 0, 0),
+    discoverHdChain(w.xpub, 0, 0, w.receiveIndex || 0),
     discoverHdChain(w.xpub, 1, 0),
   ]);
 
@@ -603,6 +608,14 @@ function registerIpc() {
       unconfirmed,
       details,
       receiveAddresses: resolved.receiveAddresses,
+      // Cual ofrecer para cobrar. Se decide aca y no en la pantalla porque es
+      // una afirmacion sobre la cadena ("nadie la uso nunca"), y el historial
+      // que la respalda vive en este lado. En modo rapido no hubo barrido:
+      // sale null y la pantalla que lo pide es la del detalle, que si barre.
+      direccionSinEstrenar: wallet.firstUnusedReceiveAddress(
+        resolved.receiveAddresses,
+        resolved.receiveIndex || w.receiveIndex || 0
+      ),
       server: network.serverName(),
       // Los historiales del barrido cuentan como respaldo igual que los saldos
       // (ver hdImportReport). En el camino rapido no hubo barrido y la lista

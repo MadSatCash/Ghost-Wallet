@@ -175,6 +175,27 @@ function getAddressesFromXPub(xpub, change = 0, startIndex = 0, count = 20) {
   return out;
 }
 
+// La primera direccion de recepcion que la cadena confirma sin estrenar.
+//
+// Que cuenta como sin estrenar: historyLength === 0 y nada mas. El barrido
+// anota `null` cuando no pudo preguntar o cuando el vacio no quedo respaldado
+// por el cruce entre operadores, y un "no se" no se ofrece como direccion
+// nueva: si en realidad ya cobro, la estamos reusando y eso expone al que
+// paga y al que cobra.
+//
+// `desde` es el puntero de la wallet (receiveIndex): lo que ya se entrego no
+// se vuelve a ofrecer aunque siga vacio. Si el puntero quedo mas alto que lo
+// barrido, se cae a la primera confirmada sin estrenar — repetir una direccion
+// fresca es feo, ofrecer una sin respaldo es peor.
+//
+// Devuelve null si ninguna califica. Es un resultado valido: significa que la
+// pantalla no puede afirmar cual esta libre, y eso hay que decirlo en vez de
+// inventar una.
+function firstUnusedReceiveAddress(receiveAddresses, desde = 0) {
+  const sinEstrenar = (receiveAddresses || []).filter(a => a && a.historyLength === 0);
+  return sinEstrenar.find(a => a.index >= desde) || sinEstrenar[0] || null;
+}
+
 // Devuelve la clave privada (en hex) de la direccion especificada de la frase.
 function getPrivateKeyHexForPath(mnemonic, account = 0, change = 0, index = 0) {
   const bitcore = require('bitcore-lib-cash');
@@ -358,6 +379,7 @@ module.exports = {
   getXPubFromMnemonic,
   getXPubFromHexHd,
   getAddressesFromXPub,
+  firstUnusedReceiveAddress,
   getPrivateKeyHexForPath,
   getPrivateKeyHexForHexHdPath,
   buildAndSignTx,

@@ -1124,6 +1124,42 @@ async function main() {
     eq('una wallet realmente vacia devuelve cero sin lanzar', vacia.utxos.length, 0);
   }
 
+  {
+    console.log('\n== Cual direccion se ofrece para cobrar ==');
+    // historyLength: 0 = la cadena confirmo que nunca se uso, >0 = se uso,
+    // null = no se pudo preguntar. La diferencia entre 0 y null es la regla.
+    const rama = (historiales) => historiales.map((h, index) => ({
+      index, change: 0, address: 'addr' + index, historyLength: h,
+    }));
+
+    eq(
+      'ofrece la primera que la cadena vio sin estrenar',
+      w.firstUnusedReceiveAddress(rama([3, 1, 0, 0]), 0).index,
+      2
+    );
+    eq(
+      'una direccion sin respuesta no se ofrece como nueva',
+      w.firstUnusedReceiveAddress(rama([1, null, 0]), 0).index,
+      2
+    );
+    eq(
+      'respeta el puntero: lo ya entregado no se vuelve a ofrecer',
+      w.firstUnusedReceiveAddress(rama([0, 0, 0, 0]), 2).index,
+      2
+    );
+    eq(
+      'si el puntero quedo mas alto que lo barrido, vuelve a una confirmada',
+      w.firstUnusedReceiveAddress(rama([1, 0, 0]), 99).index,
+      1
+    );
+    eq(
+      'sin ninguna confirmada sin estrenar no inventa una',
+      w.firstUnusedReceiveAddress(rama([2, null, 1]), 0),
+      null
+    );
+    eq('sin direcciones devuelve null', w.firstUnusedReceiveAddress([], 0), null);
+  }
+
   console.log(`\nTODO OK (${passed} comprobaciones)\n`);
 }
 

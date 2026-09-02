@@ -1,6 +1,6 @@
 {
   "name": "bch-wallet",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Wallet de escritorio BCH: simple, rapida y segura",
   "main": "src/main/main.js",
   "type": "commonjs",
